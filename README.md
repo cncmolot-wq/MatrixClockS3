@@ -1,7 +1,69 @@
 # MatrixClockS3
-ESP32 Matrix Clock with Fire animation, Web UI and modular architecture
 
-This repository contains the machine-level instruction core
-used to control AI-assisted development.
+## PURPOSE
+Проект LED-часов на ESP32-S3.
+Используется как рабочий код, не публичный продукт.
 
-Not intended for general use.
+---
+
+## SOURCE OF TRUTH
+
+Основные правила проекта:
+docs/project/.mc_core.v4.ini
+
+README не является источником истины.
+Он используется только как контекст.
+
+---
+
+## CURRENT STATE
+
+- режим: один (Fire + Clock)
+- Web UI: активен
+- LittleFS: используется
+- OTA: включено
+- NTP: включено
+
+---
+
+## ARCHITECTURE (КРАТКО)
+
+- display_runtime — рендер
+- effects — эффекты
+- ui — веб интерфейс
+- hardware — работа с железом
+
+---
+
+## LIMITS
+
+- WS2812 → ограничение FPS
+- нет параллельного вывода
+- Wi-Fi влияет на стабильность
+
+---
+
+## RULE FOR AI
+
+ИИ ОБЯЗАН:
+
+- соблюдать .mc_core.v4.ini
+- не менять архитектуру без запроса
+- делать только точечные правки
+- не добавлять функционал “от себя”
+
+---
+
+## EDITING POLICY
+
+Любое изменение:
+- должно быть локальным
+- не должно ломать существующую логику
+- не должно менять структуру файлов
+
+---
+
+## NOTE
+
+Проект находится в активной разработке.
+Стабильность важнее расширения функционала.
