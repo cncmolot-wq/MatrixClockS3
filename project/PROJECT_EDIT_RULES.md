@@ -1,4 +1,4 @@
-﻿> Important: before editing this file, review the files in `docs/project/` first so the documentation stays synchronized.
+> Important: before editing this file, review the files in `docs/project/` first so the documentation stays synchronized.
 
 # Project Edit Rules
 
@@ -169,7 +169,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check_literal_newlines.ps1
 
 AI CORE:
 
-The file `.mc_core.v4.ini` defines the machine-level behavior constraints.
+The file `mc_core.v4.ini` defines the machine-level behavior constraints.
 It must be treated as part of the editing contract.
 
 Main project docs live in:
