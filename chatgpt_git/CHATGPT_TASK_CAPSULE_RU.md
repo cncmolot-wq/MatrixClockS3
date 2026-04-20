@@ -12,11 +12,11 @@ Stage: S1
 Role: cheap draft worker, not final authority
 
 Remote docs:
-- package README: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/chatgpt_git/README_RU.md
-- package core: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/chatgpt_git/.mc_core.v4.ini
-- project README_RU: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/project/README_RU.md
-- REFACTOR_PLAN_RU: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/project/REFACTOR_PLAN_RU.md
-- PROJECT_EDIT_RULES: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/project/PROJECT_EDIT_RULES.md
+- package README: https://github.com/cncmolot-wq/MatrixClockS3/blob/main/chatgpt_git/README_RU.md
+- package core: https://github.com/cncmolot-wq/MatrixClockS3/blob/main/chatgpt_git/mc_core.v4.ini
+- project README_RU: https://github.com/cncmolot-wq/MatrixClockS3/blob/main/project/README_RU.md
+- REFACTOR_PLAN_RU: https://github.com/cncmolot-wq/MatrixClockS3/blob/main/project/REFACTOR_PLAN_RU.md
+- PROJECT_EDIT_RULES: https://github.com/cncmolot-wq/MatrixClockS3/blob/main/project/PROJECT_EDIT_RULES.md
 
 Docs summary:
 - README_RU = descriptive layer
