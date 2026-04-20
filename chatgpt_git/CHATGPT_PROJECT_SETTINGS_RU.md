@@ -51,7 +51,7 @@
 
 УДАЛЁННЫЕ ИСТОЧНИКИ:
 - package README: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/chatgpt_git/README_RU.md
-- package core: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/chatgpt_git/.mc_core.v4.ini
+- package core: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/chatgpt_git/mc_core.v4.ini
 - task capsule: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/chatgpt_git/CHATGPT_TASK_CAPSULE_RU.md
 - project README_RU: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/project/README_RU.md
 - project REFACTOR_PLAN_RU: https://github.com/<OWNER>/<REPO>/blob/<BRANCH>/docs/project/REFACTOR_PLAN_RU.md
