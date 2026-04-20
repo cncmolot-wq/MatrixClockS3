@@ -1,4 +1,4 @@
-﻿> Important: before editing this file, review the files in `docs/project/` first so the documentation stays synchronized.
+> Important: before editing this file, review the files in `docs/project/` first so the documentation stays synchronized.
 
 > Важно: перед правкой этого файла сначала ознакомься с файлами в папке `docs/project/`, чтобы сохранить синхронизацию документации.
 
@@ -33,6 +33,10 @@
 - проект сознательно не расширяется новыми пользовательскими функциями, пока не будет закрыт `Stage 1`
 
 Этот репозиторий отражает **текущее состояние проекта**, а не архив старых экспериментов. Старые процедурные ветки огня и промежуточный генерационный мусор были убраны в пользу текущей runtime-схемы.
+
+Текущая контрольная точка:
+- фундамент `Stage 1` уже в основном собран
+- но продуктовый Wi-Fi onboarding, переносимый OTA path и остаточные кодировочные хвосты ещё не считаются окончательно закрытыми
 
 ---
 
@@ -329,6 +333,7 @@ http://192.168.x.x
 
 Для отдельной публикации во внешний GitHub теперь собран самостоятельный пакет:
 - [`docs/chatgpt_git/README_RU.md`](../chatgpt_git/README_RU.md)
+- [`docs/chatgpt_git/mc_core.v4.ini`](../chatgpt_git/mc_core.v4.ini)
 - [`docs/chatgpt_git/GITHUB_PUBLISH_STEPS_RU.md`](../chatgpt_git/GITHUB_PUBLISH_STEPS_RU.md)
 
 Рабочая схема:
