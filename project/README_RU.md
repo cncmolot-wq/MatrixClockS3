@@ -322,7 +322,7 @@ http://192.168.x.x
 Если нужно экономить ресурс, внешний обычный ChatGPT используется не как второй архитектор, а как дешёвый генератор локальных patch-заготовок.
 
 Для этого в проекте подготовлены:
-- [`docs/project/.mc_core.v4.ini`](./.mc_core.v4.ini) — профиль cheap draft worker
+- [`docs/project/mc_core.v4.ini`](./mc_core.v4.ini) — профиль cheap draft worker
 - [`docs/project/CHATGPT_PROJECT_SETTINGS_RU.md`](./CHATGPT_PROJECT_SETTINGS_RU.md) — готовая короткая инструкция для настроек проекта в обычном ChatGPT
 - [`docs/project/CHATGPT_TASK_CAPSULE_RU.md`](./CHATGPT_TASK_CAPSULE_RU.md) — шаблон точной задачи
 - GitHub-ссылки на эти документы уже встроены в инструкции, чтобы внешний ChatGPT мог опираться на удалённые правила, если умеет читать ссылки
