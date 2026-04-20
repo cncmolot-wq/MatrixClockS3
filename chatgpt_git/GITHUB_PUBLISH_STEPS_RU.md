@@ -20,7 +20,7 @@
 
 Из этой папки:
 - `docs/chatgpt_git/README_RU.md`
-- `docs/chatgpt_git/.mc_core.v4.ini`
+- `docs/chatgpt_git/mc_core.v4.ini`
 - `docs/chatgpt_git/CHATGPT_PROJECT_SETTINGS_RU.md`
 - `docs/chatgpt_git/CHATGPT_TASK_CAPSULE_RU.md`
 - `docs/chatgpt_git/GITHUB_PUBLISH_STEPS_RU.md`
@@ -40,7 +40,7 @@
 docs/
   chatgpt_git/
     README_RU.md
-    .mc_core.v4.ini
+    mc_core.v4.ini
     CHATGPT_PROJECT_SETTINGS_RU.md
     CHATGPT_TASK_CAPSULE_RU.md
     GITHUB_PUBLISH_STEPS_RU.md
@@ -53,7 +53,7 @@ docs/
 ## Что заменить после загрузки
 
 После публикации открой файлы:
-- `docs/chatgpt_git/.mc_core.v4.ini`
+- `docs/chatgpt_git/mc_core.v4.ini`
 - `docs/chatgpt_git/CHATGPT_PROJECT_SETTINGS_RU.md`
 - `docs/chatgpt_git/CHATGPT_TASK_CAPSULE_RU.md`
 
