@@ -1,81 +1,58 @@
 # MatrixClockS3
 
-## PURPOSE
-Проект LED-часов на ESP32-S3.
-Используется как рабочий код, не публичный продукт.
+MatrixClockS3 — прошивка LED-часов на ESP32-S3 для матрицы WS2812 32x8.
 
----
+## Status
 
-## SOURCE OF TRUTH
+Проект находится в активной разработке.  
+Сейчас приоритет — стабильность и поэтапная инженерная доводка, а не расширение функционала.
 
-Основные правила проекта:
-docs/project/.mc_core.v4.ini
+## Current Scope
 
-README не является источником истины.
-Он используется только как контекст.
+- Clock + Fire
+- Web UI
+- LittleFS
+- OTA
+- NTP
 
----
+## Project Docs
 
-## CURRENT STATE
+Основные документы проекта:
 
-- режим: один (Fire + Clock)
-- Web UI: активен
-- LittleFS: используется
-- OTA: включено
-- NTP: включено
+- Technical source of truth: `docs/project/REFACTOR_PLAN_RU.md`
+- Project rules and editing contract: `docs/project/PROJECT_EDIT_RULES.md`
+- Descriptive overview: `docs/project/README_RU.md`
+- Board/profile reference: `docs/project/N16R8_PROFILE_BIBLE_RU.md`
 
----
+## Architecture
 
-## ARCHITECTURE (КРАТКО)
+Кратко по слоям:
 
-- display_runtime — рендер
-- effects — эффекты
-- ui — веб интерфейс
-- hardware — работа с железом
+- `display_runtime` — диспетчер экранного runtime
+- `effects` — эффекты и визуальные блоки
+- `ui` — Web UI и state/update API
+- `hardware` — работа с железом
+- `system_services` — Wi-Fi / OTA / FS / startup services
 
----
+## Constraints
 
-## LIMITS
+- WS2812 ограничивает допустимый FPS
+- Wi-Fi влияет на runtime stability
+- проект не считается финальным публичным продуктом
 
-- WS2812 → ограничение FPS
-- нет параллельного вывода
-- Wi-Fi влияет на стабильность
+## Build
 
----
+Смотри `platformio.ini`.
 
-## RULE FOR AI
+Основные окружения:
+- `s3` — USB
+- `s3ota` — OTA
 
-ИИ ОБЯЗАН:
+## Notes
 
-- соблюдать .mc_core.v4.ini
-- не менять архитектуру без запроса
-- делать только точечные правки
-- не добавлять функционал “от себя”
+README не заменяет технический план.  
+Если есть конфликт трактовки, ориентироваться нужно на:
 
----
-
-## EDITING POLICY
-
-Любое изменение:
-- должно быть локальным
-- не должно ломать существующую логику
-- не должно менять структуру файлов
-
----
-
-## NOTE
-
-Проект находится в активной разработке.
-Стабильность важнее расширения функционала.
-
-## AI EXECUTION RULE
-
-Любые изменения кода:
-
-- только по прямому запросу
-- без расширения функционала
-- без изменения архитектуры
-- без рефакторинга
-
-При конфликте:
-локальные инструкции > README
+1. локальные инструкции
+2. `docs/project/PROJECT_EDIT_RULES.md`
+3. `docs/project/REFACTOR_PLAN_RU.md`
