@@ -1,6 +1,6 @@
-﻿> Important: before editing this file, review the files in `docs/project/` first so the documentation stays synchronized.
+﻿> Important: before editing this file, review the files in `project/` first so the documentation stays synchronized.
 
-> Важно: перед правкой этого файла сначала ознакомься с файлами в папке `docs/project/`, чтобы сохранить синхронизацию документации.
+> Важно: перед правкой этого файла сначала ознакомься с файлами в папке `project/`, чтобы сохранить синхронизацию документации.
 
 # <span style="color:#4EA1FF;">MatrixClock</span>
 
@@ -44,7 +44,7 @@
 
 В проекте теперь есть явный контур согласованности:
 
-- перед правкой файлов сначала читается документация из `docs/project/`
+- перед правкой файлов сначала читается документация из `project/`
 - после значимых изменений при необходимости обновляется документация
 - после любых многострочных scripted edits запускается `scripts/check_literal_newlines.ps1`
 - общие правила этого контура описаны в [`PROJECT_EDIT_RULES.md`](./PROJECT_EDIT_RULES.md)
