@@ -1,4 +1,4 @@
-﻿> Important: before editing this file, review the files in `docs/project/` first so the documentation stays synchronized.
+﻿> Important: before editing this file, review the files in `project/` first so the documentation stays synchronized.
 
 # Project Edit Rules
 
@@ -6,7 +6,7 @@ This document defines the project-wide editing contract.
 
 ## Rule Core
 
-- Before editing any project file, review the documentation in `docs/project/` first.
+- Before editing any project file, review the documentation in `project/` first.
 - For routine edits, read `PROJECT_CONTEXT_COMPACT_RU.md` first and open larger docs only when the task touches their area or the compact context is insufficient.
 - Do not spend documentation effort on routine or obvious edits. Record only durable value: decisions, root causes, repeated traps, stage changes, architecture/lifecycle rules, hardware/storage/network behavior, and important user scenarios.
 - Code changes, documentation changes, and project-structure changes should be treated as one connected system.
@@ -228,7 +228,7 @@ If an edit changes behavior, structure, or assumptions, the expected follow-up i
 - GitHub links for project docs and the external ChatGPT package must be checked against the real published repository before being changed locally.
 - The repository structure must not be “re-invented” inside local docs without confirmation from the actual GitHub repo.
 - The reference file for this policy is:
-  - `docs/project/GIT_REPO_REFERENCE_RU.md`
+  - `project/GIT_REPO_REFERENCE_RU.md`
 - In practice:
   - first verify the real remote path
   - then update local docs if needed
@@ -237,18 +237,18 @@ If an edit changes behavior, structure, or assumptions, the expected follow-up i
 
 ## Documentation Folder Roles
 
-- `docs/project` stores only project documentation:
+- `project` stores only project documentation:
   - README / PLAN
   - editing rules
   - board/profile references
   - Git repo reference
-- `docs/chatgpt_git` stores only the external ChatGPT/GitHub package:
+- `chatgpt_git` stores only the external ChatGPT/GitHub package:
   - project settings
   - task capsule
-- ChatGPT-oriented files must not be duplicated inside `docs/project`.
-- Project-source documentation must not be duplicated inside `docs/chatgpt_git`.
-- If a file belongs to the external ChatGPT workflow, its canonical home is `docs/chatgpt_git`.
-- If a file belongs to the project truth/model, its canonical home is `docs/project`.
+- ChatGPT-oriented files must not be duplicated inside `project`.
+- Project-source documentation must not be duplicated inside `chatgpt_git`.
+- If a file belongs to the external ChatGPT workflow, its canonical home is `chatgpt_git`.
+- If a file belongs to the project truth/model, its canonical home is `project`.
 
 ## Canonical Ownership Rule
 
@@ -261,9 +261,9 @@ If an edit changes behavior, structure, or assumptions, the expected follow-up i
 
 ## External Package Sync Rule
 
-- `docs/chatgpt_git` is not a mirror of every local documentation change.
+- `chatgpt_git` is not a mirror of every local documentation change.
 - It is a minimal publish-ready external package and should be updated only when its own contract changes.
-- Normal code work does not automatically require touching `docs/chatgpt_git`.
+- Normal code work does not automatically require touching `chatgpt_git`.
 - This rule exists to save resource and prevent unnecessary drift between the internal project truth and the external cheap-draft package.
 
 ## Project Instructions Canonical Rule
@@ -312,21 +312,21 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check_literal_newlines.ps1
 
 Project-source documentation lives in:
 
-- `docs/project/PROJECT_GUIDE_RU.md`
-- `docs/project/PROJECT_TREE_RU.md`
-- `docs/project/REFACTOR_PLAN_RU.md`
-- `docs/project/PROJECT_EDIT_RULES.md`
-- `docs/project/GIT_REPO_REFERENCE_RU.md`
-- `docs/project/N16R8_PROFILE_BIBLE_RU.md`
+- `project/PROJECT_GUIDE_RU.md`
+- `project/PROJECT_TREE_RU.md`
+- `project/REFACTOR_PLAN_RU.md`
+- `project/PROJECT_EDIT_RULES.md`
+- `project/GIT_REPO_REFERENCE_RU.md`
+- `project/N16R8_PROFILE_BIBLE_RU.md`
 
 Support and deferred layers live in:
 
-- `docs/project/README_EN.md`
-- `docs/project/REFACTOR_PLAN_EN.md`
-- `docs/project/N16R8_PROFILE_BIBLE_EN.md`
-- `docs/project/REFACTOR_PLAN.md`
+- `project/README_EN.md`
+- `project/REFACTOR_PLAN_EN.md`
+- `project/N16R8_PROFILE_BIBLE_EN.md`
+- `project/REFACTOR_PLAN.md`
 
 The external ChatGPT runtime package is intentionally minimal and lives only in:
 
-- `docs/chatgpt_git/CHATGPT_PROJECT_SETTINGS_RU.md`
-- `docs/chatgpt_git/CHATGPT_TASK_CAPSULE_RU.md`
+- `chatgpt_git/CHATGPT_PROJECT_SETTINGS_RU.md`
+- `chatgpt_git/CHATGPT_TASK_CAPSULE_RU.md`
