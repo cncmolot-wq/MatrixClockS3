@@ -1,0 +1,113 @@
+Premium Clock v1/                          # корень проекта, прошивка часов ESP32-S3
+├─ README.md                               # краткое описание проекта и запуск
+├─ platformio.ini                          # основной конфиг сборки PlatformIO
+├─ platformio.local.ini                    # локальные переопределения (Wi-Fi, ключи)
+├─ platformio.local.ini.example            # пример локального конфига
+├─ partitions_ota_16mb.csv                 # разметка flash под OTA (16MB)
+├─ partitions_ota_8mb.csv                  # разметка flash под OTA (8MB)
+│
+├─ boards/                                 # кастомные платы PlatformIO
+│  └─ matrixclock_esp32s3_n16r8.json       # описание платы ESP32-S3 N16R8
+│
+├─ data/                                   # LittleFS (заливается отдельно от прошивки)
+│  ├─ index.html                           # веб-интерфейс управления часами
+│  └─ anim/                                # бинарные анимации для эффектов
+│     └─ fire_32x8_v1.anim                 # огонь 32×8 для матрицы
+│
+├─ src/                                    # основной код прошивки
+│  ├─ main.cpp                             # entry point, loop, orchestration
+│  ├─ config.h                             # базовые define и настройки
+│  ├─ app_state.cpp / .h                   # глобальное состояние (цвета, режимы)
+│  ├─ clock_runtime.cpp / .h               # логика времени, режимов часов
+│  ├─ clock_visuals.cpp / .h               # отрисовка часов и строки погоды
+│  ├─ display_runtime.cpp / .h             # буфер, кадры, управление LED
+│  ├─ filesystem_service.cpp / .h          # работа с LittleFS
+│  ├─ ota_service.cpp / .h                 # OTA обновление прошивки
+│  ├─ rtc_service.cpp / .h                 # работа с RTC модулем
+│  ├─ runtime_metrics.cpp / .h             # FPS, метрики производительности
+│  ├─ sensor_bootstrap.cpp / .h            # инициализация датчиков с ретраями
+│  ├─ system_services.cpp / .h             # запуск всех сервисов системы
+│  ├─ weather_service.cpp / .h             # получение погоды по API
+│  ├─ wifi_service.cpp / .h                # Wi-Fi подключение и управление
+│  │
+│  ├─ audio/                               # обработка звука (если включено)
+│  │  ├─ spectrum.cpp / .h                 # FFT спектр в реальном времени
+│  │  └─ spectrum_async.cpp / .h           # асинхронный спектр без блокировок
+│  │
+│  ├─ effects/                             # визуальные эффекты матрицы
+│  │  ├─ colon.cpp / .h                    # анимации двоеточия
+│  │  ├─ digits.cpp / .h                   # цифры часов
+│  │  ├─ display_info.cpp / .h             # служебные экраны (IP и т.п.)
+│  │  ├─ fire_animation.cpp / .h           # проигрывание огня из .anim
+│  │  └─ progressbar.cpp / .h              # верхняя полоска секунд
+│  │
+│  ├─ hardware/                            # низкоуровневый доступ к железу
+│  │  ├─ i2c_bus.cpp / .h                 # шина I2C для датчиков/RTC
+│  │  ├─ matrix.cpp / .h                  # драйвер WS2812 матрицы
+│  │  └─ ntp.cpp / .h                     # синхронизация времени NTP
+│  │
+│  ├─ icons/                               # пиксельные иконки и графика
+│  │  ├─ CustomEyes.h                     # кастомные глаза (пример анимации)
+│  │  ├─ drawCustomEyes.h                 # рендер этих глаз
+│  │  ├─ humidity.h                       # иконка влажности
+│  │  └─ русские icon headers             # набор русских пиксельных иконок
+│  │
+│  ├─ sensors/                             # логика датчиков
+│  │  ├─ sensors.cpp / .h                 # синхронное чтение датчиков
+│  │  └─ sensors_async.cpp / .h           # асинхронное чтение без фризов
+│  │
+│  ├─ text/                                # текстовый рендер
+│  │  └─ font5x7_utf8.cpp / .h            # шрифт 5×7 + UTF-8 декодер
+│  │
+│  └─ ui/                                  # веб API и маршруты
+│     ├─ state.cpp / .h                   # JSON состояние устройства
+│     ├─ weather_routes.cpp / .h          # API погоды
+│     ├─ webserver.cpp / .h               # HTTP сервер ESP32
+│     └─ wifi_routes.cpp / .h             # API Wi-Fi управления
+│
+├─ docs/                                   # документация проекта
+│  ├─ project/                             # основной источник истины
+│  │  ├─ PROJECT_GUIDE_RU.md              # обзор архитектуры
+│  │  ├─ PROJECT_EDIT_RULES.md            # правила правок проекта
+│  │  ├─ PROJECT_TREE_RU.md               # дерево проекта
+│  │  ├─ REFACTOR_PLAN_RU.md             # план рефакторинга
+│  │  ├─ WEATHER_COPY_RU.md              # тексты погоды
+│  │  └─ остальные project docs          # вспомогательные документы
+│  │
+│  └─ chatgpt_git/                         # инструкции для ChatGPT/Codex
+│     ├─ CHATGPT_TASK_CAPSULE_RU.md       # задачи для AI
+│     ├─ CHATGPT_PROJECT_SETTINGS_RU.md   # режим работы AI
+│     └─ CHATGPT_CODE_AUDIT_RADAR_RU.md  # правила аудита кода
+│
+├─ pixel_editor/                           # инструменты генерации пикселей
+│  ├─ font_editor.html                     # редактор шрифтов 5×7
+│  ├─ pixel_generator.html                # генератор bitmap/массивов
+│  ├─ server.py                           # локальный сервер для редактора
+│  ├─ README.md                           # описание редактора
+│  ├─ WORKFLOW.md                         # процесс создания графики
+│  └─ animations/                         # исходники анимаций
+│     ├─ CustomEyes.h / .json            # глаза в коде и json
+│     ├─ DIG4x7.h                        # цифры 4×7
+│     ├─ DIG5x7.h                        # цифры 5×7
+│     └─ русские animation headers/json  # русские символы и анимации
+│
+├─ png/                                   # изображения и исходники
+│  ├─ main.png                            # основной скрин проекта
+│  ├─ fire_32x8_v1.gif                    # превью огня
+│  ├─ ATH20BMP280.png                     # схема датчиков
+│  ├─ DS3231_AT24C32N.png                 # схема RTC
+│  ├─ awtrix*.png/gif                     # референсы AWTRIX
+│  └─ скриншоты / исходники               # вспомогательная графика
+│
+├─ scripts/                               # вспомогательные скрипты
+│  └─ check_literal_newlines.ps1          # проверка переносов строк
+│
+├─ .vscode/                               # настройки VS Code
+│  ├─ settings.json                       # конфиг редактора
+│  ├─ launch.json                         # конфиг отладки
+│  ├─ extensions.json                     # список расширений
+│  └─ c_cpp_properties.json               # IntelliSense для C++
+│
+└─ .continue/                             # правила для AI-ассистента
+   └─ rules/
+      └─ always-answer-in-russian-never-answer-in-chinese.md  # языковое правило
