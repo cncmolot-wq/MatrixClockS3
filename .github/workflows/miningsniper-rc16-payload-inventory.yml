@@ -1,0 +1,21 @@
+name: MiningSniper RC16 all payload inventory
+on:
+  push:
+    branches: [miningsniper-rc16-recover]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inventory all payload assignments
+        shell: pwsh
+        run: |
+          ./ci/miningsniper/diagnose_all_payload_assignments.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: miningsniper-rc16-payload-inventory
+          path: ci/miningsniper/payload_inventory_out/ALL_PAYLOAD_ASSIGNMENTS.json
+          if-no-files-found: error
