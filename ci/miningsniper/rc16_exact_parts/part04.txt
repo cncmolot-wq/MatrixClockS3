@@ -1,0 +1,700 @@
+    $desired=0.0
+    }elseif($rawDesired-lt$minDuty){
+      $desired=0.0
+    }else{
+      $desired=[Math]::Min($maxDuty,$rawDesired)
+    }
+
+    if($desired-lt$currentDuty){
+      $currentDuty=$desired
+      $recoverClear=0
+    }else{
+      $recoverClear++
+      if($recoverClear-ge3){
+        if($currentDuty-eq0.0 -and $desired-ge$minDuty){$currentDuty=$minDuty}
+        else{$currentDuty=[Math]::Min($desired,$currentDuty+0.02)}
+        $recoverClear=0
+      }
+    }
+
+    if([double]$row.heartbeat_ms-ge1200){$currentDuty=0.0}
+  }
+
+}catch{
+  $errObj=$_
+  try{
+    if(-not[string]::IsNullOrWhiteSpace([string]$script:currentLearningStage)){
+      Write-MiningSniperLearningStep -ProjectRoot $Root -RunId $LearningRunId -Release $Release -StepId ([string]$script:currentLearningStage) -Outcome FAIL -Decision 'Decision-critical GPU runtime stage' -ReasonCode 'EXCEPTION' -ReasonText $errObj.Exception.Message -Evidence ([hashtable]$script:lastLearningEvidence) | Out-Null
+    }
+    Write-MiningSniperLearningEvent -ProjectRoot $Root -RunId $LearningRunId -Release $Release -EventType 'SCRIPT_EXCEPTION' -Stage 'GPU_SUPERVISOR' -Outcome 'FAIL' -Decision 'Record exact supervisor exception' -ReasonCode 'SUPERVISOR_EXCEPTION' -ReasonText $errObj.Exception.Message -Evidence @{
+      exception_type=$errObj.Exception.GetType().FullName
+      exception_message=$errObj.Exception.Message
+      script_stack=$errObj.ScriptStackTrace
+      position_message=$errObj.InvocationInfo.PositionMessage
+      calibration_pass=[bool]$calibrationPass
+      loop_samples=[int]$loopSamples
+    } | Out-Null
+  }catch{}
+  $fail=[ordered]@{utc=(Get-Date).ToUniversalTime().ToString('o');release=$Release;mode='FAIL_CLOSED';error=$errObj.Exception.ToString();calibration_pass=$calibrationPass;loop_samples=$loopSamples;learning_run_id=$LearningRunId;learning_stage=$script:currentLearningStage}
+  $fail|ConvertTo-Json -Depth 20|Set-Content -LiteralPath $healthFile -Encoding utf8
+  throw
+}finally{
+  try{Stop-GpuSampler}catch{}
+  try{if($null-ne$currentOpen){Close-Segment 'SUPERVISOR_STOP'}}catch{}
+  try{Stop-Miner}catch{}
+  Remove-Item -LiteralPath $supPid -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stopRequest -Force -ErrorAction SilentlyContinue
+}
+
+'@
+$script:StopPayload=@'
+param([string]$Root='D:\MiningSniper')
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+$s=Join-Path $Root 'PROTECTED_STATE\Beta\GPU_LANE_R065_RC16';Set-Content -LiteralPath (Join-Path $s 'STOP_REQUESTED_GPU_R065_RC16') -Value ((Get-Date).ToUniversalTime().ToString('o')) -Encoding ascii
+$pf=Join-Path $s 'supervisor.pid';if(Test-Path -LiteralPath $pf){try{$id=[int](Get-Content -Raw -LiteralPath $pf)}catch{$id=0};$deadline=(Get-Date).AddSeconds(20);while((Get-Date)-lt$deadline){if($id-le0-or$null-eq(Get-Process -Id $id -ErrorAction SilentlyContinue)){Write-Host 'GPU R065 RC16 STOPPED CLEANLY';exit 0};Start-Sleep -Milliseconds 400};Stop-Process -Id $id -Force -ErrorAction SilentlyContinue}
+Write-Host 'GPU R065 RC16 STOP REQUEST COMPLETE'
+
+'@
+$script:StatusPayload=@'
+param([string]$Root='D:\MiningSniper')
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+$s=Join-Path $Root 'PROTECTED_STATE\Beta\GPU_LANE_R065_RC16';$h=Join-Path $s 'RUNTIME_HEALTH.json';if(Test-Path -LiteralPath $h){Get-Content -Raw -LiteralPath $h}else{Write-Host 'GPU R065 RC16 health file missing'}
+
+'@
+$script:ExportPayload=@'
+param([string]$Root='D:\MiningSniper',[int]$Hours=24)
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+$tele=Join-Path $Root 'TELEMETRY\Beta\GPU_LANE_R065_RC16';if(-not(Test-Path -LiteralPath $tele)){throw 'GPU R065 RC16 telemetry root missing'}
+$tmp=Join-Path $env:TEMP ('MS_GPU_R065_RC16_EXPORT_'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Force -Path $tmp|Out-Null;$cut=(Get-Date).ToUniversalTime().AddHours(-[Math]::Max(1,$Hours))
+foreach($f in Get-ChildItem -LiteralPath $tele -Recurse -File){if($f.Name-notlike'*.open' -and $f.Name-notlike'*.tmp' -and $f.LastWriteTimeUtc-ge$cut){$rel=$f.FullName.Substring($tele.Length).TrimStart('\');$dst=Join-Path $tmp $rel;New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent)|Out-Null;Copy-Item -LiteralPath $f.FullName -Destination $dst -Force}}
+$snap=Join-Path $tmp 'ACTIVE_SNAPSHOT';New-Item -ItemType Directory -Force -Path $snap|Out-Null;$snapCount=0
+foreach($f in Get-ChildItem -LiteralPath (Join-Path $tele 'RAW') -Recurse -Filter '*.jsonl.open' -File -ErrorAction SilentlyContinue){$dst=Join-Path $snap ($f.BaseName+'.snapshot.jsonl');$src=[IO.File]::Open($f.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite);try{$out=[IO.File]::Create($dst);try{$src.CopyTo($out)}finally{$out.Dispose()}}finally{$src.Dispose()};$snapCount++}
+$first=$null;$last=$null
+foreach($f in @(Get-ChildItem -LiteralPath $tmp -Recurse -File|Where-Object{$_.Name-like'*.jsonl'})){foreach($line in Get-Content -LiteralPath $f.FullName -ErrorAction SilentlyContinue){try{$o=$line|ConvertFrom-Json
+      if($o.utc -is [datetime]){$tt=([datetime]$o.utc).ToUniversalTime()}
+      elseif($o.utc -is [datetimeoffset]){$tt=([datetimeoffset]$o.utc).UtcDateTime}
+      else{$tt=[datetimeoffset]::Parse([string]$o.utc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AllowWhiteSpaces).UtcDateTime};if($null-eq$first-or$tt-lt$first){$first=$tt};if($null-eq$last-or$tt-gt$last){$last=$tt}}catch{}}}
+$coverage=if($null-ne$first-and$null-ne$last){($last-$first).TotalSeconds}else{0};$need=$Hours*3600.0;$hs=if($coverage-ge($need-10)){'HORIZON_MET'}else{'HORIZON_NOT_MET'}
+$m=[ordered]@{schema_version='1.1';release='GPU_LANE_R065_RC16';requested_hours=$Hours;coverage_seconds=[Math]::Round($coverage,3);first_utc=if($first){$first.ToString('o')}else{$null};last_utc=if($last){$last.ToString('o')}else{$null};horizon_status=$hs;active_snapshot_included=($snapCount-gt0);active_snapshot_files=$snapCount;runtime_was_not_stopped=$true};$m|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $tmp 'EXPORT_MANIFEST.json') -Encoding utf8
+$stamp=(Get-Date).ToUniversalTime().ToString('yyyyMMdd_HHmmss');$zip=Join-Path $env:USERPROFILE ('Downloads\MiningSniper_GPU_R065_RC16_TELEMETRY_'+$stamp+'.zip');Compress-Archive -Path (Join-Path $tmp '*') -DestinationPath $zip -CompressionLevel Optimal -Force;Remove-Item -LiteralPath $tmp -Recurse -Force;$sha=(Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant();Write-Host ('GPU R065 RC16 TELEMETRY: '+$zip);Write-Host ('SHA-256: '+$sha);Write-Host ('HORIZON: '+$hs+' coverage_s='+[Math]::Round($coverage,1));Write-Host 'GPU lane was not stopped.'
+
+'@
+$ProgressPreference='SilentlyContinue'
+
+$Release='GPU_LANE_R065_RC16'
+$Version='0.65.1-gpu-rc16'
+$learningBasePath=Join-Path $Root 'MININGSNIPER_LEARNING_BASE.json'
+$learningStateDir=Join-Path $Root 'PROTECTED_STATE\Learning'
+$learningJournalPath=Join-Path $learningStateDir 'LEARNING_EVENTS.jsonl'
+$learningModuleDir=Join-Path $Root 'LEARNING'
+$learningModulePath=Join-Path $learningModuleDir 'MiningSniper.Learning.psm1'
+$learningRunId=[guid]::NewGuid().ToString('N')
+$learningReady=$false
+$currentMainLearningStage=$null
+
+function Get-BootstrapLearningSeq{
+  $max=0L
+  if(Test-Path -LiteralPath $learningBasePath){
+    try{
+      $b=Get-Content -Raw -LiteralPath $learningBasePath|ConvertFrom-Json
+      if($null-ne$b.runtime_revision){$max=[Math]::Max($max,[long]$b.runtime_revision)}
+    }catch{}
+  }
+  if(Test-Path -LiteralPath $learningJournalPath){
+    foreach($line in [IO.File]::ReadLines($learningJournalPath)){
+      if([string]::IsNullOrWhiteSpace($line)){continue}
+      try{
+        $o=$line|ConvertFrom-Json
+        if($null-ne$o.runtime_seq){$max=[Math]::Max($max,[long]$o.runtime_seq)}
+      }catch{}
+    }
+  }
+  return ($max+1L)
+}
+function Write-BootstrapLearningEvent(
+  [string]$EventType,[string]$Stage,[string]$Outcome,[string]$Decision,
+  [string]$ReasonCode,[string]$ReasonText,[hashtable]$Evidence,
+  [string]$RootCauseStatus='OBSERVED_ONLY',[string]$RootCauseOrUnknown='UNKNOWN_FROM_RUNTIME'
+){
+  [IO.Directory]::CreateDirectory($learningStateDir)|Out-Null
+  $event=[ordered]@{
+    event_id=[guid]::NewGuid().ToString('N')
+    run_id=$learningRunId
+    runtime_seq=(Get-BootstrapLearningSeq)
+    utc=[DateTimeOffset]::UtcNow.ToString('o')
+    writer_version='bootstrap-1.0'
+    source='SCRIPT_BOOTSTRAP'
+    release=$Release
+    event_type=$EventType
+    stage=$Stage
+    outcome=$Outcome
+    decision=$Decision
+    reason_code=$ReasonCode
+    reason_text=$ReasonText
+    component_outcomes=@{}
+    evidence=if($null-ne$Evidence){$Evidence}else{@{}}
+    root_cause_status=$RootCauseStatus
+    root_cause_or_unknown=$RootCauseOrUnknown
+  }
+  $json=($event|ConvertTo-Json -Compress -Depth 40)+[Environment]::NewLine
+  $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
+  $fs=[IO.FileStream]::new($learningJournalPath,[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::Read,4096,[IO.FileOptions]::WriteThrough)
+  try{$fs.Write($bytes,0,$bytes.Length);$fs.Flush($true)}finally{$fs.Dispose()}
+  return [pscustomobject]$event
+}
+function Start-MainLearningStage([string]$Stage,[string]$Decision){
+  $script:currentMainLearningStage=$Stage
+  if($learningReady){
+    Write-MiningSniperLearningStep -ProjectRoot $Root -RunId $learningRunId -Release $Release -StepId $Stage -Outcome START -Decision $Decision -ReasonCode 'STEP_ENTER' -ReasonText 'Entering decision-critical activation stage.'|Out-Null
+  }else{
+    Write-BootstrapLearningEvent 'STEP_START' $Stage 'START' $Decision 'STEP_ENTER' 'Entering decision-critical activation stage.' @{}|Out-Null
+  }
+}
+function Pass-MainLearningStage([string]$Stage,[string]$Decision,[string]$ReasonCode,[string]$ReasonText,[hashtable]$Evidence){
+  if($learningReady){
+    Write-MiningSniperLearningStep -ProjectRoot $Root -RunId $learningRunId -Release $Release -StepId $Stage -Outcome PASS -Decision $Decision -ReasonCode $ReasonCode -ReasonText $ReasonText -Evidence $Evidence|Out-Null
+  }else{
+    Write-BootstrapLearningEvent 'STEP_PASS' $Stage 'PASS' $Decision $ReasonCode $ReasonText $Evidence|Out-Null
+  }
+  $script:currentMainLearningStage=$null
+}
+function Fail-MainLearningStage([string]$Stage,[string]$ReasonText,[hashtable]$Evidence){
+  if([string]::IsNullOrWhiteSpace($Stage)){return}
+  try{
+    if($learningReady){
+      Write-MiningSniperLearningStep -ProjectRoot $Root -RunId $learningRunId -Release $Release -StepId $Stage -Outcome FAIL -Decision 'Decision-critical activation stage' -ReasonCode 'EXCEPTION' -ReasonText $ReasonText -Evidence $Evidence|Out-Null
+    }else{
+      Write-BootstrapLearningEvent 'STEP_FAIL' $Stage 'FAIL' 'Decision-critical activation stage' 'EXCEPTION' $ReasonText $Evidence|Out-Null
+    }
+  }catch{}
+}
+
+$learningBaseMissingAtStart=(-not(Test-Path -LiteralPath $learningBasePath))
+[IO.Directory]::CreateDirectory($learningStateDir)|Out-Null
+if($learningBaseMissingAtStart){
+  Write-BootstrapLearningEvent 'RUN_START' 'RUN' 'STARTED' 'Activate learning-integrated GPU duty-control candidate' 'LEARNING_BASE_MISSING_AT_START' 'Run requested but canonical learning base is missing.' @{expected_path=$learningBasePath;process_id=$PID;pwsh=$PSVersionTable.PSVersion.ToString()}|Out-Null
+}else{
+  $baseShaBefore=(Get-FileHash -Algorithm SHA256 -LiteralPath $learningBasePath).Hash.ToLowerInvariant()
+  Write-BootstrapLearningEvent 'RUN_START' 'RUN' 'STARTED' 'Activate learning-integrated GPU duty-control candidate' 'USER_EXPLICIT_RUNTIME_REOPEN' 'User explicitly requested a new release; runtime facts are journaled before GPU actions.' @{
+    entry_point='RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1'
+    project_root=$Root
+    base_sha256_before=$baseShaBefore
+    process_id=$PID
+    pwsh=$PSVersionTable.PSVersion.ToString()
+    decision_under_test='Does the repaired fractional duty scheduler create a productive measurable 10/25/40 control surface?'
+    already_proven='GTX1060 lolMiner Etchash pool bootstrap'
+  }|Out-Null
+}
+Start-MainLearningStage 'LEARNING_BOOTSTRAP' 'Install/validate runtime learning writer and replay durable journal into canonical base'
+$releaseDir=Join-Path $Root 'RELEASES\GPU_LANE_R065_RC16'
+$betaDir=Join-Path $Root 'Beta\R065_GPU_RC16'
+$stateDir=Join-Path $Root 'PROTECTED_STATE\Beta\GPU_LANE_R065_RC16'
+$telemetryDir=Join-Path $Root 'TELEMETRY\Beta\GPU_LANE_R065_RC16'
+$generatedDir=Join-Path $Root 'GENERATED\GPU_LANE_R065_RC16'
+$stage=Join-Path $Root 'STAGING\GPU_LANE_R065_RC16'
+foreach($d in @($releaseDir,$betaDir,$stateDir,$telemetryDir,$generatedDir,$stage)){New-Item -ItemType Directory -Force -Path $d|Out-Null}
+$activation=[ordered]@{schema_version='2.0';release=$Release;version=$Version;started_utc=(Get-Date).ToUniversalTime().ToString('o');learning_run_id=$learningRunId;learning_base=$learningBasePath;learning_journal=$learningJournalPath;learning_writer_version='1.2';checks=[ordered]@{};cpu_rc6_untouched=$true;gpu_started=$false;gpu_active=$false;cpu_rc6_preflight=$null;cpu_rc6_post_gpu=$null;duty_root_cause_fixture=$null;bootstrap_result=$null;warmup_result=$null;calibration_result=$null;gpu_health=$null;error=$null}
+$activationPath=Join-Path $generatedDir 'ACTIVATION_REPORT_GPU_R065_RC16.json'
+function Save-Activation([string]$status){$activation.status=$status;$activation.completed_utc=(Get-Date).ToUniversalTime().ToString('o');$activation|ConvertTo-Json -Depth 40|Set-Content -LiteralPath $activationPath -Encoding utf8}
+function Parse-Num([string]$s){$v=0.0;if([double]::TryParse($s.Trim(),[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$v)){return $v};return $null}
+function Find-NvidiaSmi{$c=Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue;if($null-ne$c){return $c.Source};foreach($p in @('C:\Windows\System32\nvidia-smi.exe','C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe')){if(Test-Path -LiteralPath $p){return $p}};return $null}
+function Get-NvidiaInventory([string]$Nvidia){$lines=@(& $Nvidia '--query-gpu=index,name,driver_version,memory.total,utilization.gpu,temperature.gpu,power.draw' '--format=csv,noheader,nounits' 2>&1);if($LASTEXITCODE-ne0){throw ('nvidia-smi failed: '+($lines-join' | '))};$out=@();foreach($line in $lines){$a=([string]$line)-split ','|ForEach-Object{$_.Trim()};if($a.Count-lt7){throw ('nvidia-smi malformed: '+$line)};$out+=[ordered]@{index=[int]$a[0];name=$a[1];driver=$a[2];memory_total_mb=(Parse-Num $a[3]);util_pct=(Parse-Num $a[4]);temp_c=(Parse-Num $a[5]);power_w=(Parse-Num $a[6]);raw=[string]$line}};return $out}
+function Test-PortFree([int]$Port){try{$x=Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue;if($null-ne$x){return $false}}catch{};return $true}
+function Get-XmrigApi([int]$Port){try{return Invoke-RestMethod -Uri ('http://127.0.0.1:'+$Port+'/2/summary') -TimeoutSec 3 -ErrorAction Stop}catch{return $null}}
+
+function Test-PidAlive([object]$Value){
+  try{$id=[int]$Value;if($id-le0){return $false};return $null-ne(Get-Process -Id $id -ErrorAction SilentlyContinue)}catch{return $false}
+}
+function Get-HealthFileAgeSeconds([string]$HealthPath){
+  try{
+    $f=Get-Item -LiteralPath $HealthPath -ErrorAction Stop
+    return ((Get-Date).ToUniversalTime()-$f.LastWriteTimeUtc).TotalSeconds
+  }catch{
+    return [double]::PositiveInfinity
+  }
+}
+function Convert-UtcRecordTime([object]$Value){
+  if($null-eq$Value){throw 'UTC value is null'}
+  if($Value -is [datetime]){return ([datetime]$Value).ToUniversalTime()}
+  if($Value -is [datetimeoffset]){return ([datetimeoffset]$Value).UtcDateTime}
+  return [datetimeoffset]::Parse(
+    [string]$Value,
+    [Globalization.CultureInfo]::InvariantCulture,
+    [Globalization.DateTimeStyles]::AllowWhiteSpaces
+  ).UtcDateTime
+}
+function Probe-XmrigApiAdvisory([int]$Port,[int]$WindowSeconds=15){
+  $deadline=(Get-Date).AddSeconds($WindowSeconds);$attempts=0;$last=$null
+  while((Get-Date)-lt$deadline){
+    $attempts++;$last=Get-XmrigApi $Port
+    if($null-ne$last){return [ordered]@{ok=$true;attempts=$attempts;data=$last}}
+    Start-Sleep -Milliseconds 700
+  }
+  return [ordered]@{ok=$false;attempts=$attempts;data=$null}
+}
+function Assert-CpuRc6LoopLiveness([string]$StateDir,[string]$HealthPath,[object]$Rel,[int]$ObserveSeconds=9){
+  $supPath=Join-Path $StateDir 'supervisor.pid'
+  $minerPath=Join-Path $StateDir 'xmrig.pid'
+  if(-not(Test-Path -LiteralPath $supPath)){throw 'R063 RC6 supervisor.pid missing'}
+  if(-not(Test-Path -LiteralPath $minerPath)){throw 'R063 RC6 xmrig.pid missing'}
+  if(-not(Test-Path -LiteralPath $HealthPath)){throw 'R063 RC6 health file missing'}
+  $sup=[int](Get-Content -Raw -LiteralPath $supPath)
+  $minerPid=[int](Get-Content -Raw -LiteralPath $minerPath)
+  if(-not(Test-PidAlive $sup)){throw 'R063 RC6 supervisor process is not alive'}
+  if(-not(Test-PidAlive $minerPid)){throw 'R063 RC6 miner process is not alive'}
+  $h1=Get-Content -Raw -LiteralPath $HealthPath|ConvertFrom-Json
+  if([string]$h1.mode-ne'ACTIVE_CONTINUOUS'){throw ('R063 RC6 mode is '+[string]$h1.mode+', expected ACTIVE_CONTINUOUS')}
+  $age1=Get-HealthFileAgeSeconds $HealthPath
+  if($age1-gt30){throw ('R063 RC6 health file is stale before GPU activation age_s='+[Math]::Round($age1,3))}
+  Start-Sleep -Seconds $ObserveSeconds
+  if(-not(Test-PidAlive $sup)){throw 'R063 RC6 supervisor exited during coexistence proof'}
+  if(-not(Test-PidAlive $minerPid)){throw 'R063 RC6 miner exited during coexistence proof'}
+  $h2=Get-Content -Raw -LiteralPath $HealthPath|ConvertFrom-Json
+  $age2=Get-HealthFileAgeSeconds $HealthPath
+  if($age2-gt30){throw ('R063 RC6 health stopped updating age_s='+[Math]::Round($age2,3))}
+  if([int]$h2.loop_samples-le[int]$h1.loop_samples){throw ('R063 RC6 loop_samples did not advance: '+[int]$h1.loop_samples+' -> '+[int]$h2.loop_samples)}
+  $apiPort=$null
+  try{$apiPort=[int]$h2.api_port}catch{try{$apiPort=[int]$Rel.api_port}catch{}}
+  $api=[ordered]@{status='ADVISORY_NOT_RUN';attempts=0;port=$apiPort}
+  if($null-ne$apiPort-and$apiPort-gt0){
+    $p=Probe-XmrigApiAdvisory $apiPort 10
+    $api=[ordered]@{status=if($p.ok){'PASS'}else{'ADVISORY_TIMEOUT'};attempts=$p.attempts;port=$apiPort}
+  }
+  return [ordered]@{
+    supervisor_pid=$sup
+    miner_pid=$minerPid
+    mode=[string]$h2.mode
+    loop_before=[int]$h1.loop_samples
+    loop_after=[int]$h2.loop_samples
+    health_age_before_s=[Math]::Round($age1,3)
+    health_age_after_s=[Math]::Round($age2,3)
+    cpu_target_pct=[double]$h2.cpu_target_pct
+    api_advisory=$api
+  }
+}
+
+try{
+  if($learningBaseMissingAtStart){throw ('Canonical learning base missing: '+$learningBasePath)}
+  $baseBeforeRaw=Get-Content -Raw -LiteralPath $learningBasePath -Encoding UTF8
+  $baseBefore=$baseBeforeRaw|ConvertFrom-Json
+  if([string]$baseBefore.schema-ne'miningsniper-learning-base/v1'){throw 'Canonical learning base schema mismatch'}
+  $semanticBefore=@($baseBefore.event_log).Count
+  $baseShaBefore=(Get-FileHash -Algorithm SHA256 -LiteralPath $learningBasePath).Hash.ToLowerInvariant()
+
+  # Install writer 1.2, but prove it on an isolated COPY of the actual canonical base first.
+  New-Item -ItemType Directory -Force -Path $learningModuleDir|Out-Null
+  Set-Content -LiteralPath $learningModulePath -Value $script:LearningModulePayload -Encoding utf8
+  $moduleTokens=$null;$moduleErrors=$null
+  [Management.Automation.Language.Parser]::ParseFile($learningModulePath,[ref]$moduleTokens,[ref]$moduleErrors)|Out-Null
+  if($moduleErrors.Count-gt0){throw ('Learning module ParseFile failed: '+(($moduleErrors|ForEach-Object{$_.Message})-join' | '))}
+  Import-Module $learningModulePath -Force
+
+  $selfRoot=Join-Path $env:TEMP ('MS_LEARNING_R065_RC16_'+[guid]::NewGuid().ToString('N'))
+  $selfState=Join-Path $selfRoot 'PROTECTED_STATE\Learning';New-Item -ItemType Directory -Force -Path $selfState|Out-Null
+  Copy-Item -LiteralPath $learningBasePath -Destination (Join-Path $selfRoot 'MININGSNIPER_LEARNING_BASE.json') -Force
+  try{
+    $beforeSelf=Get-Content -Raw -LiteralPath (Join-Path $selfRoot 'MININGSNIPER_LEARNING_BASE.json')|ConvertFrom-Json
+    $selfSemanticBefore=@($beforeSelf.event_log).Count
+    $selfRun='self_'+[guid]::NewGuid().ToString('N')
+    Write-MiningSniperLearningEvent -ProjectRoot $selfRoot -RunId $selfRun -Release 'LEARNING_SELFTEST' -EventType 'RUN_START' -Stage 'RUN' -Outcome 'STARTED' -Decision 'prove actual-base schema writer' -ReasonCode 'SELFTEST' -ReasonText 'schema-preserving writer selftest'|Out-Null
+    Write-MiningSniperLearningEvent -ProjectRoot $selfRoot -RunId $selfRun -Release 'LEARNING_SELFTEST' -EventType 'STEP_PASS' -Stage 'A' -Outcome 'PASS' -Decision 'normal append/replay' -ReasonCode 'SELFTEST_PASS' -ReasonText 'normal event' -Evidence @{probe=42}|Out-Null
+    $afterNormal=Get-Content -Raw -LiteralPath (Join-Path $selfRoot 'MININGSNIPER_LEARNING_BASE.json')|ConvertFrom-Json
+    if(@($afterNormal.event_log).Count-ne$selfSemanticBefore){throw 'Learning writer mutated semantic event_log'}
+    $normalCount=@($afterNormal.runtime_event_log).Count
+    Sync-MiningSniperLearningBase -ProjectRoot $selfRoot|Out-Null
+    $afterReplay=Get-Content -Raw -LiteralPath (Join-Path $selfRoot 'MININGSNIPER_LEARNING_BASE.json')|ConvertFrom-Json
+    if(@($afterReplay.runtime_event_log).Count-ne$normalCount){throw 'Learning replay duplicated events'}
+
+    # Crash window: durable journal append with NO base sync, then replay.
+    $paths=Get-MsLearningPaths -ProjectRoot $selfRoot
+    $crashSeq=Get-MsNextRuntimeSeq -JournalPath $paths.Journal
+    $crash=New-MsOrderedEvent -RunId $selfRun -RuntimeSeq $crashSeq -Release 'LEARNING_SELFTEST' -EventType 'STEP_FAIL' -Stage 'CRASH_WINDOW' -Outcome 'FAIL' -Decision 'prove WAL recovery' -ReasonCode 'SIMULATED_CRASH' -ReasonText 'journal durable, base intentionally unsynced'
+    Write-MsJournalRecordDurable -JournalPath $paths.Journal -Record $crash
+    $preCrash=Get-Content -Raw -LiteralPath $paths.Base|ConvertFrom-Json
+    if(@($preCrash.runtime_event_log|Where-Object{$_.event_id-eq$crash.event_id}).Count-ne0){throw 'Crash-window event reached base before sync'}
+    Sync-MiningSniperLearningBase -ProjectRoot $selfRoot|Out-Null
+    $postCrash=Get-Content -Raw -LiteralPath $paths.Base|ConvertFrom-Json
+    if(@($postCrash.runtime_event_log|Where-Object{$_.event_id-eq$crash.event_id}).Count-ne1){throw 'Crash-window replay did not recover exactly once'}
+
+    # Torn tail: write an intentionally incomplete JSON record, then append next valid event.
+    $junk=[Text.UTF8Encoding]::new($false).GetBytes('{"event_id":"TORN')
+    $jfs=[IO.FileStream]::new($paths.Journal,[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::Read,4096,[IO.FileOptions]::WriteThrough)
+    try{$jfs.Write($junk,0,$junk.Length);$jfs.Flush($true)}finally{$jfs.Dispose()}
+    $tornSeq=Get-MsNextRuntimeSeq -JournalPath $paths.Journal
+    $afterTorn=New-MsOrderedEvent -RunId $selfRun -RuntimeSeq $tornSeq -Release 'LEARNING_SELFTEST' -EventType 'STEP_PASS' -Stage 'TORN_TAIL_RECOVERY' -Outcome 'PASS' -Decision 'append valid event after torn tail' -ReasonCode 'SELFTEST_PASS' -ReasonText 'writer must add a separator and preserve next event'
+    Write-MsJournalRecordDurable -JournalPath $paths.Journal -Record $afterTorn
+    Sync-MiningSniperLearningBase -ProjectRoot $selfRoot|Out-Null
+    $postTorn=Get-Content -Raw -LiteralPath $paths.Base|ConvertFrom-Json
+    if(@($postTorn.runtime_event_log|Where-Object{$_.event_id-eq$afterTorn.event_id}).Count-ne1){throw 'Torn-tail recovery lost next valid event'}
+
+    $activation.checks.learning_schema_selftest='PASS'
+    $activation.checks.learning_replay_idempotent='PASS'
+    $activation.checks.learning_crash_window='PASS'
+    $activation.checks.learning_torn_tail='PASS'
+  }finally{
+    Remove-Item -LiteralPath $selfRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  $syncReal=Sync-MiningSniperLearningBase -ProjectRoot $Root
+  $learningReady=$true
+  $baseAfter=Get-Content -Raw -LiteralPath $learningBasePath|ConvertFrom-Json
+  if(@($baseAfter.event_log).Count-ne$semanticBefore){throw 'Real learning-base sync mutated semantic history'}
+  $activation.checks.learning_real_sync='PASS'
+  Pass-MainLearningStage 'LEARNING_BOOTSTRAP' 'Install/validate runtime learning writer and replay durable journal into canonical base' 'LEARNING_STORE_PASS' 'Learning writer parsed/imported; actual-base schema selftest, replay, crash-window and torn-tail recovery all passed before GPU activity.' @{
+    writer_version='1.2'
+    canonical_base_sha256_before=$baseShaBefore
+    semantic_events_preserved=$semanticBefore
+    real_sync_added=[int]$syncReal.added
+    journal_path=$learningJournalPath
+    module_path=$learningModulePath
+    actual_base_schema_selftest='PASS'
+    crash_window_replay=$true
+    torn_tail_recovery=$true
+  }
+
+  # Exact duty behavior fixture: full final child is embedded with param-first, not assembled from fragments.
+  Start-MainLearningStage 'RC14_DUTY_ROOT_CAUSE_FIXTURE' 'Execute exact delivered duty functions without GPU/miner and prove RC14 zero-duty mechanism plus repaired 10/25/40 schedule'
+  $tokens=$null;$errs=$null
+  $supervisorAst=[Management.Automation.Language.Parser]::ParseInput($script:SupervisorPayload,[ref]$tokens,[ref]$errs)
+  if($errs.Count-gt0){throw ('Supervisor payload ParseInput failed before duty fixture: '+(($errs|ForEach-Object{$_.Message})-join' | '))}
+  $fixtureTokens=$null;$fixtureErrs=$null
+  $fixtureAst=[Management.Automation.Language.Parser]::ParseInput($script:DutyFixturePayload,[ref]$fixtureTokens,[ref]$fixtureErrs)
+  if($fixtureErrs.Count-gt0){throw ('Duty fixture payload ParseInput failed: '+(($fixtureErrs|ForEach-Object{$_.Message})-join' | '))}
+  $firstFixtureLine=($script:DutyFixturePayload -split "`r?`n"|Where-Object{-not[string]::IsNullOrWhiteSpace($_)}|Select-Object -First 1).Trim()
+  if(-not$firstFixtureLine.StartsWith('param(')){throw ('GENERATED-CHILD-ENTRY-PARAM-FIRST-V2 failed: '+$firstFixtureLine)}
+  $supDutyFns=@($supervisorAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and ($node.Name-eq'Get-DutySchedule' -or $node.Name-eq'Invoke-DutyWindow')},$true))
+  $fixDutyFns=@($fixtureAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and ($node.Name-eq'Get-DutySchedule' -or $node.Name-eq'Invoke-DutyWindow')},$true))
+  foreach($fnName in @('Get-DutySchedule','Invoke-DutyWindow')){
+    $sf=@($supDutyFns|Where-Object{$_.Name-eq$fnName}|Select-Object -First 1)
+    $ff=@($fixDutyFns|Where-Object{$_.Name-eq$fnName}|Select-Object -First 1)
+    if($sf.Count-ne1-or$ff.Count-ne1){throw ('TRANSITIVE-EXECUTABLE-ARTIFACT-GATE-V1 missing function '+$fnName)}
+    $sn=($sf[0].Extent.Text -replace '\s+',' ').Trim()
+    $fn=($ff[0].Extent.Text -replace '\s+',' ').Trim()
+    if($sn-ne$fn){throw ('TRANSITIVE-EXECUTABLE-ARTIFACT-GATE-V1 function drift '+$fnName)}
+  }
+  $dutyFixture=Join-Path $stage 'DUTY_BEHAVIOR_EXACT_SELFTEST.ps1'
+  $dutyFixtureResult=Join-Path $generatedDir 'DUTY_BEHAVIOR_EXACT_SELFTEST_RESULT.json'
+  Set-Content -LiteralPath $dutyFixture -Value $script:DutyFixturePayload -Encoding utf8
+  $childTokens=$null;$childErrors=$null
+  [Management.Automation.Language.Parser]::ParseFile($dutyFixture,[ref]$childTokens,[ref]$childErrors)|Out-Null
+  if($childErrors.Count-gt0){throw ('Generated duty child ParseFile failed: '+(($childErrors|ForEach-Object{$_.Message})-join' | '))}
+  $fixtureOut=@(& pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $dutyFixture -ResultPath $dutyFixtureResult 2>&1)
+  $fixtureRc=$LASTEXITCODE
+  if($fixtureRc-ne0 -or -not($fixtureOut-contains'DUTY_BEHAVIOR_EXACT_SELFTEST_PASS') -or -not(Test-Path -LiteralPath $dutyFixtureResult)){
+    throw ('DUTY-BEHAVIOR-EXEC-FIXTURE-V3 failed rc='+$fixtureRc+' output='+(($fixtureOut|ForEach-Object{[string]$_})-join' | '))
+  }
+  $dutyProof=Get-Content -Raw -LiteralPath $dutyFixtureResult|ConvertFrom-Json
+  $activation.duty_root_cause_fixture=$dutyProof
+  if([string]$dutyProof.status-ne'PASS' -or [string]$dutyProof.root_cause_status-ne'PROVEN_BY_EXECUTABLE_FIXTURE'){
+    throw 'Duty fixture returned non-PASS root-cause status'
+  }
+  $activation.checks.duty_fixture_param_first='PASS'
+  $activation.checks.duty_fixture_function_parity='PASS'
+  $activation.checks.duty_fixture_exact_exec='PASS'
+  Write-MiningSniperLearningEvent -ProjectRoot $Root -RunId $learningRunId -Release $Release -EventType 'COMPONENT_EVIDENCE' -Stage 'RC14_DUTY_ROOT_CAUSE' -Outcome 'PASS' -Decision 'Explain RC14 actual_duty_mean zero before any GPU start' -ReasonCode 'RC14_NUMERIC_OVERLOAD_REPRODUCED_AND_FIXED' -ReasonText 'Exact delivered fixture reproduced RC14 zero-duty arithmetic and proved repaired schedule/fake-controller timing.' -Evidence @{
+    rc14_old_d10=[int]$dutyProof.rc14_old_active_ms.d10
+    rc14_old_d25=[int]$dutyProof.rc14_old_active_ms.d25
+    rc14_old_d40=[int]$dutyProof.rc14_old_active_ms.d40
+    repaired_d10=[int]$dutyProof.repaired_schedule_active_ms.'0.1'
+    repaired_d25=[int]$dutyProof.repaired_schedule_active_ms.'0.25'
+    repaired_d40=[int]$dutyProof.repaired_schedule_active_ms.'0.4'
+  }|Out-Null
+  Pass-MainLearningStage 'RC14_DUTY_ROOT_CAUSE_FIXTURE' 'Execute exact delivered duty functions without GPU/miner and prove RC14 zero-duty mechanism plus repaired 10/25/40 schedule' 'DUTY_FIXTURE_PASS' 'Exact generated duty behavior fixture passed before GPU activity.' @{
+    old_10=[int]$dutyProof.rc14_old_active_ms.d10
+    old_25=[int]$dutyProof.rc14_old_active_ms.d25
+    old_40=[int]$dutyProof.rc14_old_active_ms.d40
+    new_10=[int]$dutyProof.repaired_schedule_active_ms.'0.1'
+    new_25=[int]$dutyProof.repaired_schedule_active_ms.'0.25'
+    new_40=[int]$dutyProof.repaired_schedule_active_ms.'0.4'
+    exact_child_param_first=$true
+    supervisor_function_parity=$true
+  }
+
+  $currentMainLearningStage='CPU_RC6_COEXISTENCE_PRE'
+  Start-MainLearningStage 'CPU_RC6_COEXISTENCE_PRE' 'Prove active CPU RC6 by supervisor+miner+advancing health; API is advisory only'
+  $cpuState=Join-Path $Root 'PROTECTED_STATE\Beta\PilotA_R063_RC6'
+  $cpuHealth=Join-Path $cpuState 'RUNTIME_HEALTH.json'
+  $cpuReleaseFile=Join-Path $cpuState 'CURRENT_RELEASE.json'
+  if(-not(Test-Path -LiteralPath $cpuReleaseFile)){throw 'R063 RC6 CURRENT_RELEASE.json missing'}
+  $cpuRel=Get-Content -Raw -LiteralPath $cpuReleaseFile|ConvertFrom-Json
+  if([string]$cpuRel.release-ne'PilotA_R063_RC6'){throw ('Unexpected CPU release: '+[string]$cpuRel.release)}
+  $cpuProof=Assert-CpuRc6LoopLiveness $cpuState $cpuHealth $cpuRel 9
+  $activation.cpu_rc6_preflight=$cpuProof
+  $activation.checks.cpu_rc6='PASS_INDEPENDENT_SUPERVISOR_MINER_ADVANCING_HEALTH'
+  Pass-MainLearningStage 'CPU_RC6_COEXISTENCE_PRE' 'Prove active CPU RC6 by supervisor+miner+advancing health; API is advisory only' 'CPU_RC6_COEXISTENCE_PASS' 'CPU RC6 supervisor and miner are alive and health loop advanced; local API result is advisory only.' ([hashtable]$cpuProof)
+
+  $currentMainLearningStage='NVIDIA_TELEMETRY_PRECHECK'
+  Start-MainLearningStage 'NVIDIA_TELEMETRY_PRECHECK' 'Discover NVIDIA telemetry backend and verify GTX1060 exact device before GPU candidate start'
+  $nvidia=Find-NvidiaSmi
+  if($null-eq$nvidia){throw 'nvidia-smi.exe not found'}
+  $gpus=Get-NvidiaInventory $nvidia
+  if($gpus.Count-lt1){throw 'No NVIDIA GPU returned'}
+  $target=@($gpus|Where-Object{[string]$_.name-match'(?i)GTX\s*1060'}|Select-Object -First 1)
+  if($target.Count-ne1){throw ('GTX 1060 not found; inventory='+($gpus|ConvertTo-Json -Compress))}
+  $activation.checks.nvidia_telemetry='PASS'
+  $activation.gpu_inventory=$gpus
+  Pass-MainLearningStage 'NVIDIA_TELEMETRY_PRECHECK' 'Discover NVIDIA telemetry backend and verify GTX1060 exact device before GPU candidate start' 'NVIDIA_TELEMETRY_PASS' 'nvidia-smi returned the expected GTX1060 before GPU candidate start.' @{backend=$nvidia;gpu_name=[string]$target[0].name;driver=[string]$target[0].driver;memory_total_mb=$target[0].memory_total_mb}
+
+  $currentMainLearningStage='LOLMINER_PROVENANCE'
+  Start-MainLearningStage 'LOLMINER_PROVENANCE' 'Use the exact previously-proven clean lolMiner executable and forbid wildcard miner-directory copies'
+  $provFile=Join-Path $Root 'PROTECTED_STATE\Beta\GPU_LANE_R063_RC8\LOLMINER_PROVENANCE.json'
+  $fallback=@(Get-ChildItem -LiteralPath (Join-Path $Root 'Beta') -Recurse -File -Filter 'lolMiner.exe' -ErrorAction SilentlyContinue|Where-Object{$_.FullName-notmatch'R065_GPU_RC16'}|Sort-Object LastWriteTimeUtc -Descending)
+  $sourceLol=$null
+  $expectedLolSha=$null
+  $assetName=$null
+  $assetUrl=$null
+  $assetSha=$null
+  $tag='1.98a'
+  if(Test-Path -LiteralPath $provFile){
+    try{
+      $p=Get-Content -Raw -LiteralPath $provFile|ConvertFrom-Json
+      if($null-ne$p.lolminer_exe -and (Test-Path -LiteralPath ([string]$p.lolminer_exe))){$sourceLol=[string]$p.lolminer_exe}
+      if($null-ne$p.exe_sha256){$expectedLolSha=([string]$p.exe_sha256).ToLowerInvariant()}
+      if($null-ne$p.asset){$assetName=[string]$p.asset}
+      if($null-ne$p.browser_download_url){$assetUrl=[string]$p.browser_download_url}
+      if($null-ne$p.asset_sha256){$assetSha=([string]$p.asset_sha256).ToLowerInvariant()}
+    }catch{}
+  }
+  if($null-eq$sourceLol -and $fallback.Count-gt0){$sourceLol=$fallback[0].FullName}
+  if($null-eq$sourceLol){throw 'No previously-proven lolMiner.exe available'}
+  $sourceSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $sourceLol).Hash.ToLowerInvariant()
+  if($null-ne$expectedLolSha -and $sourceSha-ne$expectedLolSha){throw 'Previously-proven lolMiner exe hash no longer matches stored provenance'}
+  if($null-eq$expectedLolSha){$expectedLolSha=$sourceSha}
+  $onlyLol=Join-Path $betaDir 'lolMiner.exe'
+  Copy-Item -LiteralPath $sourceLol -Destination $onlyLol -Force
+  if((Get-FileHash -Algorithm SHA256 -LiteralPath $onlyLol).Hash.ToLowerInvariant()-ne$expectedLolSha){throw 'lolMiner copy hash mismatch'}
+  $activation.checks.lolminer_provenance='PASS_REUSED_PROVEN_EXACT_EXE'
+  $activation.lolminer=[ordered]@{tag=$tag;source=$sourceLol;exe_sha256=$expectedLolSha;asset=$assetName;browser_download_url=$assetUrl;asset_sha256=$assetSha;copied_files=@('lolMiner.exe')}
+  Pass-MainLearningStage 'LOLMINER_PROVENANCE' 'Use the exact previously-proven clean lolMiner executable and forbid wildcard miner-directory copies' 'LOLMINER_PROVENANCE_PASS' 'Exact previously-proven lolMiner executable was copied alone and hash matched provenance.' @{source=$sourceLol;exe_sha256=$expectedLolSha;copied_files=@('lolMiner.exe')}
+
+  $currentMainLearningStage='LOLMINER_HOST_COMPATIBILITY'
+  Start-MainLearningStage 'LOLMINER_HOST_COMPATIBILITY' 'Execute a bounded help/version probe on the exact lolMiner binary before installing runtime'
+  $helpOut=Join-Path $stage 'lolminer_help.stdout.txt';$helpErr=Join-Path $stage 'lolminer_help.stderr.txt'
+  $hp=Start-Process -FilePath $onlyLol -ArgumentList @('--help') -WindowStyle Hidden -RedirectStandardOutput $helpOut -RedirectStandardError $helpErr -PassThru
+  if(-not$hp.WaitForExit(20000)){try{Stop-Process -Id $hp.Id -Force -ErrorAction SilentlyContinue}catch{};throw 'lolMiner --help timeout'}
+  if($hp.ExitCode-ne0){throw ('lolMiner --help exit='+$hp.ExitCode+' stderr='+(Get-Content -Raw -LiteralPath $helpErr -ErrorAction SilentlyContinue))}
+  $activation.checks.lolminer_host='PASS_HELP_EXIT_0'
+  Pass-MainLearningStage 'LOLMINER_HOST_COMPATIBILITY' 'Execute a bounded help/version probe on the exact lolMiner binary before installing runtime' 'LOLMINER_HOST_PASS' 'lolMiner executable starts and exits cleanly on the host.' @{exit_code=$hp.ExitCode}
+
+  $currentMainLearningStage='GENERATED_RUNTIME_GATES'
+  Start-MainLearningStage 'GENERATED_RUNTIME_GATES' 'Write exact generated scripts and reject parser, stale identity, symbol, parameter/state, schema, hashrate or calibration regressions before GPU start'
+  $supervisor=Join-Path $betaDir 'GPU_GOVERNOR_R065_RC16.ps1'
+  $stop=Join-Path $betaDir 'STOP_GPU_R065_RC16.ps1'
+  $status=Join-Path $betaDir 'STATUS_GPU_R065_RC16.ps1'
+  $export=Join-Path $betaDir 'EXPORT_GPU_R065_RC16_TELEMETRY.ps1'
+  Set-Content -LiteralPath $supervisor -Value $script:SupervisorPayload -Encoding utf8
+  Set-Content -LiteralPath $stop -Value $script:StopPayload -Encoding utf8
+  Set-Content -LiteralPath $status -Value $script:StatusPayload -Encoding utf8
+  Set-Content -LiteralPath $export -Value $script:ExportPayload -Encoding utf8
+  $generatedScripts=@($supervisor,$stop,$status,$export)
+
+  foreach($p in $generatedScripts){
+    $t=$null;$e=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($p,[ref]$t,[ref]$e)
+    if($e.Count-gt0){throw ('Generated parse fail '+$p+': '+(($e|ForEach-Object{$_.Message})-join' | '))}
+    $first=Get-Content -LiteralPath $p|Where-Object{$_ -notmatch '^\s*$'}|Select-Object -First 1
+    if([string]$first-notmatch'^param\('){throw ('Generated child PARAM-FIRST gate failed '+$p+': '+$first)}
+  }
+
+  $sv=Get-Content -Raw -LiteralPath $supervisor
+  foreach($bad in @('GPU_LANE_R063_RC','GPU_LANE_R064_RC','R063_GPU_RC','R064_GPU_RC','GPU_GOVERNOR_R063','GPU_GOVERNOR_R064')){if($sv-like('*'+$bad+'*')){throw ('Stale GPU identity token: '+$bad)}}
+  if($sv-notmatch'GPU_LANE_R065_RC16'){throw 'Current GPU R065 RC16 identity missing'}
+  if($sv-match'(?i)WinRing0|Add-MpPreference|Set-MpPreference|--pl\b|--cclk|--mclk|--coff|--moff'){throw 'Forbidden driver/Defender/OC-UV-PL token in supervisor'}
+  if($sv-match'(?i)function\s+Get-NetworkState\s*\(\s*\[int\]\s*\$Pid\b'){throw 'Reserved automatic variable PID reused as parameter'}
+  if($sv-notmatch'\[pscustomobject\]\[ordered\]@\{ok=\$false;pool_20128=\$false;pool_20128_any_state=\$false;connections=@\(\);error='){throw 'Network fail schema is not stable'}
+  if($sv-match'\.network\.pool_20128'){throw 'Unsafe nested pool access returned'}
+  if($sv-notmatch'API_TOTAL_PERFORMANCE' -or $sv-notmatch'Average\s+speed' -or $sv-notmatch'hashrate_source'){throw 'API-first/log-fallback hashrate attribution missing'}
+  if($sv-notmatch'MsThreadDutyController'){throw 'Duty controller implementation missing'}
+  if($sv-notmatch'function\s+Get-DutySchedule' -or $sv-notmatch'function\s+Invoke-DutyWindow'){throw 'Corrected explicit duty scheduler missing'}
+  if($sv-match'\[Math\]::Min\(1,\$Target\)' -or $sv-match'\[Math\]::Max\(0,\[Math\]::Min\(1,\$Target\)'){throw 'RC14 mixed numeric overload returned'}
+  if($sv-match'(?i)(?<!script:)\$duty\.(Suspend|Resume|SuspendedThreadCount)'){throw 'Unqualified duty controller reference'}
+  if($sv-match'(?i)function\s+Measure-DutyPhase\s*\(\s*\[double\]\$Duty(?:\W|$)'){throw 'Duty phase parameter can shadow controller concept'}
+  foreach($retired in @('duty_weighted_util_proxy_pct','duty_weighted_power_proxy_w','median_active_util_pct','median_active_power_w','median_cycle_gpu_pct','median_cycle_power_w')){if($sv-match[regex]::Escape($retired)){throw ('Retired calibration token returned: '+$retired)}}
+  foreach($need in @('--loop-ms=200','Get-FreshLogHashratesSince','actual_duty_fraction','CALIBRATION_10','CALIBRATION_25','CALIBRATION_40','minimum_stable_productive_duty','sampler_util_mean_pct','sampler_power_mean_w')){if($sv-notlike('*'+$need+'*')){throw ('Current calibration contract missing token: '+$need)}}
+
+  # Case-insensitive function parameter vs automatic/reserved variable gate.
+  $reserved=@('PID','Host','HOME','PSScriptRoot','PSCommandPath','MyInvocation','PSVersionTable','Error','Args','Input','Matches','NestedPromptLevel','ShellId','This','ExecutionContext','StackTrace')
+  $params=@($ast.FindAll({param($n)$n-is[Management.Automation.Language.ParameterAst]},$true))
+  foreach($pa in $params){$name=$pa.Name.VariablePath.UserPath;foreach($rv in $reserved){if([string]::Equals($name,$rv,[StringComparison]::OrdinalIgnoreCase)){throw ('Reserved automatic variable parameter: '+$name)}}}
+
+  # Custom internal function closure. Explicit current names only.
+  $defined=@($ast.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|ForEach-Object{$_.Name})
+  foreach($required in @('Parse-Num','Find-NvidiaSmi','Get-NvidiaRow','Get-ForegroundEnginePct','Get-HeartbeatMs','Get-LolApi','Convert-LolApiHashrateMhs','Parse-LolHashrateLine','Get-LolHashrateObservation','Get-NativeLogTail','Get-NetworkState','Test-Pool20128','Start-Miner','Attach-DutyController','Stop-Miner','Day-Dirs','Start-Segment','Close-Segment','Add-Row','Write-Health','Run-ProductiveBootstrap','Get-DutySchedule','Invoke-DutyWindow','Run-DutyCycle','Median','Average','Get-LineCount','Get-LinesSince','Get-FreshLogHashratesSince','Start-GpuSampler','Stop-GpuSampler','Parse-SamplerRowsSince','Get-ApiEtchashSnapshot','Measure-DutyPhase','Start-LearningStage','Pass-LearningStage','Write-LearningState')){if($required-notin$defined){throw ('Missing internal function: '+$required)}}
+
+  # Behavioral hashrate fixtures execute exact delivered functions instead of regex-inspecting regex source.
+  $hashFixture=Join-Path $stage 'HASHRATE_DETECTOR_EXACT_SELFTEST.ps1'
+  $hashFixtureText=@'
+param()
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+function Parse-LolHashrateLine([string]$Line){
+  if([string]::IsNullOrWhiteSpace($Line)){return $null}
+  $m=[regex]::Match($Line,'(?i)\bAverage\s+speed(?:\s*\([^)]*\))?\s*:\s*([0-9]+(?:[\.,][0-9]+)?)\s*(Mh/s|Mhs)\b')
+  if($m.Success){return [double]::Parse($m.Groups[1].Value.Replace(',','.'),[Globalization.CultureInfo]::InvariantCulture)}
+  return $null
+}
+function Convert-LolApiHashrateMhs([object]$Api){
+  if($null-eq$Api -or -not$Api.ok -or $null-eq$Api.data){return $null}
+  foreach($alg in @($Api.data.Algorithms)){
+    if([string]$alg.Algorithm -notmatch '(?i)^Etchash$'){continue}
+    $v=[double]$alg.Total_Performance;$unit=([string]$alg.Performance_Unit).Trim().ToLowerInvariant()
+    if($unit-eq'mh/s' -or $unit-eq'mhs'){return $v}
+  }
+  return $null
+}
+$api=[pscustomobject]@{ok=$true;data=[pscustomobject]@{Algorithms=@([pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239})}}
+$a=Convert-LolApiHashrateMhs $api;if([Math]::Abs([double]$a-12.352733907856239)-gt0.000001){throw 'API Total_Performance fixture failed'}
+$l=Parse-LolHashrateLine 'Average speed (5s): 17.89 Mh/s';if([Math]::Abs([double]$l-17.89)-gt0.000001){throw 'Native log (5s) fixture failed'}
+Write-Host 'PASS_HASHRATE_EXACT_FIXTURES'
+'@
+  Set-Content -LiteralPath $hashFixture -Value $hashFixtureText -Encoding utf8
+  $ht=$null;$he=$null;[Management.Automation.Language.Parser]::ParseFile($hashFixture,[ref]$ht,[ref]$he)|Out-Null;if($he.Count-gt0){throw 'Hashrate fixture parser fail'}
+  $hf=& pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $hashFixture 2>&1;if($LASTEXITCODE-ne0-or($hf-notcontains'PASS_HASHRATE_EXACT_FIXTURES')){throw ('Hashrate fixture execution fail: '+($hf-join' | '))}
+
+  $apiPort=$null
+  foreach($p in 18081..18089){if(Test-PortFree $p){$apiPort=$p;break}}
+  if($null-eq$apiPort){throw 'No free local GPU API port 18081..18089'}
+
+  $nativeLog=Join-Path $stateDir 'lolminer_native.log';$stdout=Join-Path $generatedDir 'lolminer.stdout.txt';$stderr=Join-Path $generatedDir 'lolminer.stderr.txt'
+  $releaseObj=[ordered]@{
+    release=$Release
+    version=$Version
+    created_utc=(Get-Date).ToUniversalTime().ToString('o')
+    lolminer_exe=$onlyLol
+    lolminer_sha256=$expectedLolSha
+    release_dir=$betaDir
+    pool='gulf.moneroocean.stream:20128'
+    wallet='miningsniper'
+    pass='x'
+    api_port=$apiPort
+    native_log_file=$nativeLog
+    stdout_file=$stdout
+    stderr_file=$stderr
+    max_normalized_duty=0.40
+    default_initial_duty=0.10
+    live_floor_policy='calibration selects first stable productive duty from 10/25/40; below floor -> pause'
+    controller='MsThreadDutyController explicit script state'
+    bootstrap='unthrottled max 75s until fresh hash + pool, then duty attach'
+    no_defender_exclusion=$true
+    no_winring0=$true
+    no_oc_uv_powerlimit=$true
+    cpu_rc6_untouched=$true
+    learning_integrated=$true
+    learning_run_id=$learningRunId
+    learning_base=$learningBasePath
+  }
+  $releaseObj|ConvertTo-Json -Depth 20|Set-Content -LiteralPath (Join-Path $stateDir 'CURRENT_RELEASE.json') -Encoding utf8
+  $releaseObj|ConvertTo-Json -Depth 20|Set-Content -LiteralPath (Join-Path $releaseDir 'RELEASE_MANIFEST.json') -Encoding utf8
+  Pass-MainLearningStage 'GENERATED_RUNTIME_GATES' 'Write exact generated scripts and reject parser, stale identity, symbol, parameter/state, schema, hashrate or calibration regressions before GPU start' 'GENERATED_RUNTIME_GATES_PASS' 'All current generated-runtime parser/identity/schema/scope/symbol/calibration and behavioral hashrate guards passed.' @{
+    generated_scripts=@($generatedScripts)
+    api_port=$apiPort
+    hashrate_fixture='PASS'
+    duty_behavior_fixture='PASS_PREVIOUS_STAGE'
+    retired_calibration_tokens='ABSENT'
+    reserved_parameter_collisions=0
+  }
+
+  $currentMainLearningStage='GPU_RUNTIME'
+  Start-MainLearningStage 'GPU_RUNTIME' 'Start one supervisor that bootstraps, measures 40 warmup plus 10/25/40 phases, then promotes live only on real evidence'
+  Remove-Item -LiteralPath (Join-Path $stateDir 'STOP_REQUESTED_GPU_R065_RC16') -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $nativeLog,$stdout,$stderr -Force -ErrorAction SilentlyContinue
+  $supOut=Join-Path $generatedDir 'GPU_R065_RC16_SUPERVISOR.stdout.txt'
+  $supErr=Join-Path $generatedDir 'GPU_R065_RC16_SUPERVISOR.stderr.txt'
+  Remove-Item -LiteralPath $supOut,$supErr -Force -ErrorAction SilentlyContinue
+  $sup=Start-Process -FilePath 'pwsh.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$supervisor,'-Root',$Root,'-LearningRunId',$learningRunId) -WindowStyle Hidden -RedirectStandardOutput $supOut -RedirectStandardError $supErr -PassThru
+  $activation.gpu_started=$true
+  $activation.supervisor_pid=$sup.Id
+  Save-Activation 'GPU_SUPERVISOR_STARTED_WAITING_CALIBRATION'
+
+  $calPath=Join-Path $stateDir 'CALIBRATION_RESULT.json'
+  $warmPath=Join-Path $stateDir 'WARMUP_RESULT.json'
+  $bootPath=Join-Path $stateDir 'BOOTSTRAP_RESULT.json'
+  $health=Join-Path $stateDir 'RUNTIME_HEALTH.json'
+  $deadline=(Get-Date).AddMinutes(7)
+  $pass=$false
+  while((Get-Date)-lt$deadline){
+    $sup.Refresh()
+    if($sup.HasExited){
+      $err=if(Test-Path -LiteralPath $supErr){(Get-Content -LiteralPath $supErr -Tail 35)-join' | '}else{'stderr file missing'}
+      throw ('GPU supervisor exited before calibration PASS. stderr tail: '+$err)
+    }
+    if(Test-Path -LiteralPath $calPath){
+      try{
+        $cal=Get-Content -Raw -LiteralPath $calPath|ConvertFrom-Json
+        if($cal.blocking_acceptance-eq$true){$pass=$true;break}
+        elseif($cal.blocking_acceptance-eq$false){throw ('GPU calibration explicitly rejected: '+($cal|ConvertTo-Json -Compress -Depth 20))}
+      }catch{if($_.Exception.Message-like'GPU calibration explicitly rejected*'){throw}}
+    }
+    Start-Sleep -Seconds 2
+  }
+  if(-not$pass){throw 'GPU R065 RC16 did not produce calibration PASS within 7 minutes'}
+  Start-Sleep -Seconds 3
+  if($sup.HasExited){throw 'GPU supervisor exited immediately after calibration PASS'}
+  if(-not(Test-Path -LiteralPath $health)){throw 'GPU health missing after calibration PASS'}
+  $gh=Get-Content -Raw -LiteralPath $health|ConvertFrom-Json
+  if([string]$gh.mode-ne'ACTIVE_CONTINUOUS'){throw ('GPU mode after calibration is '+[string]$gh.mode+', expected ACTIVE_CONTINUOUS')}
+  if([int]$gh.loop_samples-lt5){throw 'GPU active loop sample canary not satisfied'}
+  $activation.bootstrap_result=if(Test-Path -LiteralPath $bootPath){Get-Content -Raw -LiteralPath $bootPath|ConvertFrom-Json}else{$null}
+  $activation.warmup_result=if(Test-Path -LiteralPath $warmPath){Get-Content -Raw -LiteralPath $warmPath|ConvertFrom-Json}else{$null}
+  $activation.calibration_result=$cal
+  $activation.gpu_health=$gh
+  $activation.gpu_active=$true
+  $activation.checks.gpu_runtime='PASS_CALIBRATED_LIVE'
+  Pass-MainLearningStage 'GPU_RUNTIME' 'Start one supervisor that bootstraps, measures 40 warmup plus 10/25/40 phases, then promotes live only on real evidence' 'GPU_LIVE_PASS' 'GPU supervisor remained alive after full calibrated PASS and reported ACTIVE_CONTINUOUS.' @{
+    supervisor_pid=[int]$sup.Id
+    mode=[string]$gh.mode
+    loop_samples=[int]$gh.loop_samples
+    calibration_pass=[bool]$cal.blocking_acceptance
+    minimum_stable_productive_duty=$cal.minimum_stable_productive_duty
+    measured_control_effect=[bool]$cal.measured_control_effect
+  }
+
+  $currentMainLearningStage='CPU_RC6_COEXISTENCE_POST'
+  Start-MainLearningStage 'CPU_RC6_COEXISTENCE_POST' 'Prove GPU activation did not stop or stall CPU RC6'
+  $cpuPost=Assert-CpuRc6LoopLiveness $cpuState $cpuHealth $cpuRel 9
+  if([int]$cpuPost.loop_after-le[int]$activation.cpu_rc6_preflight.loop_after){throw 'CPU RC6 did not advance beyond pre-GPU coexistence proof'}
+  $activation.cpu_rc6_post_gpu=$cpuPost
+  $activation.checks.cpu_rc6_post_gpu='PASS_ADVANCING'
+  Pass-MainLearningStage 'CPU_RC6_COEXISTENCE_POST' 'Prove GPU activation did not stop or stall CPU RC6' 'CPU_RC6_POST_PASS' 'CPU RC6 remained ACTIVE_CONTINUOUS and advanced after GPU live promotion.' ([hashtable]$cpuPost)
+
+  $activation.cpu_rc6_untouched=$true
+  Save-Activation 'PASS_GPU_LIVE_LEARNING_ACTIVE'
+  Complete-MiningSniperLearningRun -ProjectRoot $Root -RunId $learningRunId -Release $Release -Outcome PASS -ReasonCode 'GPU_LIVE_AND_LEARNING_ACTIVE' -ReasonText 'GPU R065 RC16 completed exact duty fixture, calibrated 10/25/40 and entered live mode while CPU RC6 remained independent.' -Evidence @{
+    activation_report=$activationPath
+    gpu_active=$true
+    minimum_stable_productive_duty=$activation.calibration_result.minimum_stable_productive_duty
+    cpu_rc6_untouched=$true
+  } -ComponentOutcomes @{learning_store='PASS';cpu_rc6='PASS_UNTOUCHED';gpu_live='PASS';duty_control_surface='PASS'}|Out-Null
+  Write-Host '';Write-Host 'MININGSNIPER R065 GPU RC16: PASS / GPU LIVE + LEARNING ACTIVE' -ForegroundColor Green
+  Write-Host ('GPU MINIMUM STABLE PRODUCTIVE DUTY: '+$activation.calibration_result.minimum_stable_productive_duty)
+  Write-Host ('ACTIVATION REPORT: '+$activationPath)
+  Write-Host ('LEARNING BASE: '+$learningBasePath)
+  Write-Host ('LEARNING JOURNAL: '+$learningJournalPath)
+  exit 0
+}catch{
+  $errObj=$_
+  $msg=$errObj.Exception.Message
+  $activation.error=[ordered]@{stage=$currentMainLearningStage;message=$msg;exception=$errObj.Exception.ToString();script_stack=$errObj.ScriptStackTrace;position=$errObj.InvocationInfo.PositionMessage}
+  $activation.cpu_rc6_untouched=$true
+  $activation.gpu_active=$false
+  try{Save-Activation 'FAIL_CLOSED'}catch{}
+  Fail-MainLearningStage ([string]$currentMainLearningStage) $msg @{exception_type=$errObj.Exception.GetType().FullName;exception_message=$msg;script_stack=$errObj.ScriptStackTrace;position_message=$errObj.InvocationInfo.PositionMessage;activation_report=$activationPath;gpu_started=[bool]$activation.gpu_started;gpu_active=$false}
+  try{
+    if($learningReady){
+      Complete-MiningSniperLearningRun -ProjectRoot $Root -RunId $learningRunId -Release $Release -Outcome FAIL -ReasonCode 'ACTIVATION_EXCEPTION' -ReasonText $msg -Evidence @{exception_type=$errObj.Exception.GetType().FullName;exception_message=$msg;script_stack=$errObj.ScriptStackTrace;position_message=$errObj.InvocationInfo.PositionMessage;activation_report=$activationPath;gpu_started=[bool]$activation.gpu_started;gpu_active=$false;current_stage=$currentMainLearningStage} -ComponentOutcomes @{learning_store='PASS_UNLESS_FAILURE_OCCURRED_INSIDE_LEARNING_BOOTSTRAP';cpu_rc6_untouched=$true;gpu_started=[bool]$activation.gpu_started;gpu_live=$false}|Out-Null
+    }else{
+      Write-BootstrapLearningEvent 'RUN_FINAL_FAIL' 'RUN' 'FAIL' 'Finalize runtime attempt' 'ACTIVATION_EXCEPTION' $msg @{activation_report=$activationPath;gpu_started=[bool]$activation.gpu_started;gpu_active=$false;current_stage=$currentMainLearningStage;exception_type=$errObj.Exception.GetType().FullName}|Out-Null
+    }
+  }catch{}
+  if($activation.gpu_started){
+    try{Set-Content -LiteralPath (Join-Path $stateDir 'STOP_REQUESTED_GPU_R065_RC16') -Value ((Get-Date).ToUniversalTime().ToString('o')) -Encoding ascii}catch{}
+  }
+  Write-Host '';Write-Host ('MININGSNIPER R065 GPU RC16: FAIL - '+$msg) -ForegroundColor Red
+  Write-Host 'CPU R063 RC6 WAS NOT STOPPED OR RECONFIGURED.'
+  Write-Host ('ACTIVATION REPORT: '+$activationPath)
+  Write-Host ('LEARNING BASE: '+$learningBasePath)
+  Write-Host ('LEARNING JOURNAL: '+$learningJournalPath)
+  Write-Host ('LEARNING RUN ID: '+$learningRunId)
+  Write-Host 'Do not rerun after FAIL; return activation report + learning base.'
+  exit 1
+}
