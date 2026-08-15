@@ -1,0 +1,322 @@
+-Force -ErrorAction SilentlyContinue}}catch{}
+    $script:samplerProc=$null
+  }
+}
+function Parse-SamplerRowsSince([int]$StartLine){
+  $rows=[Collections.Generic.List[object]]::new()
+  foreach($line in @(Get-LinesSince $script:samplerFile $StartLine)){
+    try{
+      $a=([string]$line)-split ','|ForEach-Object{$_.Trim()}
+      if($a.Count-lt8){continue}
+      $u=Parse-Num $a[1];$mu=Parse-Num $a[2];$used=Parse-Num $a[3];$total=Parse-Num $a[4];$temp=Parse-Num $a[5];$power=Parse-Num $a[6]
+      if($null-eq$u -or $null-eq$power){continue}
+      $rows.Add([pscustomobject][ordered]@{
+        timestamp=$a[0];util_pct=$u;mem_util_pct=$mu;memory_used_mb=$used;memory_total_mb=$total;
+        temp_c=$temp;power_w=$power;pstate=$a[7]
+      })
+    }catch{}
+  }
+  return @($rows)
+}
+function Get-ApiEtchashSnapshot{
+  $api=Get-LolApi
+  if($null-eq$api-or-not$api.ok){return [pscustomobject][ordered]@{ok=$false;performance_mhs=$null;accepted=$null;rejected=$null;stales=$null}}
+  try{
+    foreach($alg in @($api.data.Algorithms)){
+      if([string]$alg.Algorithm -match '(?i)^Etchash$'){
+        return [pscustomobject][ordered]@{
+          ok=$true
+          performance_mhs=(Convert-LolApiHashrateMhs $api)
+          accepted=[int64]$alg.Total_Accepted
+          rejected=[int64]$alg.Total_Rejected
+          stales=[int64]$alg.Total_Stales
+        }
+      }
+    }
+  }catch{}
+  return [pscustomobject][ordered]@{ok=$false;performance_mhs=$null;accepted=$null;rejected=$null;stales=$null}
+}
+function Measure-DutyPhase([double]$DutyFraction,[string]$Name,[int]$SettleCycles=4,[int]$MeasureCycles=10){
+  for($i=0;$i-lt$SettleCycles;$i++){
+    if($miner.HasExited){throw ('lolMiner exited during '+$Name+' settle')}
+    $null=Run-DutyCycle $DutyFraction ($Name+'_SETTLE') 2000 $false
+  }
+
+  $samplerStart=Get-LineCount $script:samplerFile
+  $logStart=Get-LineCount ([string]$r.native_log_file)
+  $apiStart=Get-ApiEtchashSnapshot
+  $samples=[Collections.Generic.List[object]]::new()
+
+  for($i=0;$i-lt$MeasureCycles;$i++){
+    if($miner.HasExited){throw ('lolMiner exited during '+$Name+' measure')}
+    $samples.Add((Run-DutyCycle $DutyFraction $Name 2000 $false))
+  }
+  Start-Sleep -Milliseconds 500
+
+  $samplerRows=@(Parse-SamplerRowsSince $samplerStart)
+  $freshHash=@(Get-FreshLogHashratesSince $logStart)
+  $apiEnd=Get-ApiEtchashSnapshot
+
+  $power=@($samplerRows|Where-Object{$null-ne$_.power_w}|ForEach-Object{[double]$_.power_w})
+  $util=@($samplerRows|Where-Object{$null-ne$_.util_pct}|ForEach-Object{[double]$_.util_pct})
+  $temp=@($samplerRows|Where-Object{$null-ne$_.temp_c}|ForEach-Object{[double]$_.temp_c})
+  $awake=@($samples|ForEach-Object{[double]$_.actual_duty_fraction})
+  $poolTrue=@($samples|Where-Object{Test-Pool20128 $_.network}).Count
+  $threadMin=($samples|Measure-Object -Property suspended_threads -Minimum).Minimum
+  $hashPositive=@($freshHash|Where-Object{$_-gt0})
+
+  $freshMedian=Median ([double[]]$hashPositive)
+  $freshMean=Average ([double[]]$hashPositive)
+  $poolFraction=if($samples.Count-gt0){$poolTrue/[double]$samples.Count}else{0}
+  $actualDutyMean=Average ([double[]]$awake)
+  $actualDutyError=if($null-ne$actualDutyMean){[Math]::Abs($actualDutyMean-$DutyFraction)}else{1.0}
+
+  return [pscustomobject][ordered]@{
+    name=$Name
+    duty=$DutyFraction
+    settle_cycles=$SettleCycles
+    measure_cycles=$MeasureCycles
+    sampler_samples=$samplerRows.Count
+    actual_duty_mean=$actualDutyMean
+    actual_duty_error=$actualDutyError
+    sampler_util_mean_pct=(Average ([double[]]$util))
+    sampler_util_median_pct=(Median ([double[]]$util))
+    sampler_power_mean_w=(Average ([double[]]$power))
+    sampler_power_median_w=(Median ([double[]]$power))
+    sampler_temp_max_c=if($temp.Count-gt0){($temp|Measure-Object -Maximum).Maximum}else{$null}
+    fresh_hash_samples=$freshHash.Count
+    fresh_positive_hash_samples=$hashPositive.Count
+    fresh_hash_median_mhs=$freshMedian
+    fresh_hash_mean_mhs=$freshMean
+    pool_ready_fraction=$poolFraction
+    min_suspended_threads=[int]$threadMin
+    api_start=$apiStart
+    api_end=$apiEnd
+  }
+}
+
+try{
+  Start-LearningStage 'GPU_BOOTSTRAP' 'Start already-proven lolMiner/Etchash prerequisite and reach fresh productive pool-connected state'
+  $miner=Start-Miner
+  $bootstrap=Run-ProductiveBootstrap $miner 75
+  $bootEvidence=@{
+    status=[string]$bootstrap.status
+    wall_seconds=[double]$bootstrap.wall_seconds
+    hashrate_mhs=[double]$bootstrap.last_hashrate_mhs
+    hashrate_source=[string]$bootstrap.last_hashrate_source
+    pool_established=[bool]$bootstrap.ever_pool_established
+    api_ready=[bool]$bootstrap.ever_api_ready
+    max_gpu_util_pct=[double]$bootstrap.max_gpu_util_pct
+    max_power_w=[double]$bootstrap.max_power_w
+    max_memory_used_mb=[double]$bootstrap.max_memory_used_mb
+    max_temp_c=[double]$bootstrap.max_temp_c
+  }
+  Pass-LearningStage 'GPU_BOOTSTRAP' 'Reach productive prerequisite state' 'PRODUCTIVE_BOOTSTRAP_PROVEN' 'lolMiner reached fresh Etchash hashrate with pool established; this is prerequisite evidence, not the new decision under test.' $bootEvidence
+
+  Start-LearningStage 'GPU_DUTY_ATTACH' 'Attach thread-duty controller only after productive initialization'
+  $attachedThreads=Attach-DutyController $miner
+  $script:lastLearningEvidence=@{attached_suspended_threads=[int]$attachedThreads}
+  if($attachedThreads-le0){throw 'Duty controller attached after bootstrap but suspended zero threads'}
+  Pass-LearningStage 'GPU_DUTY_ATTACH' 'Attach controller after bootstrap' 'DUTY_CONTROLLER_ATTACHED' 'Thread duty controller attached after productive bootstrap.' @{attached_suspended_threads=[int]$attachedThreads}
+
+  Start-LearningStage 'GPU_PHASE_SAMPLER' 'Start independent NVIDIA phase sampler without probing inside duty active windows'
+  Start-GpuSampler
+  $samplerStartupCount=Get-LineCount $script:samplerFile
+  $script:lastLearningEvidence=@{sampler_file=[string]$script:samplerFile;initial_samples=[int]$samplerStartupCount}
+  Pass-LearningStage 'GPU_PHASE_SAMPLER' 'Start independent sampler' 'INDEPENDENT_SAMPLER_ACTIVE' 'Independent nvidia-smi sampler produced data.' @{sampler_file=[string]$script:samplerFile;initial_samples=[int]$samplerStartupCount}
+
+  Start-LearningStage 'GPU_CONTROLLED_WARMUP_40' 'Prove fresh productive mining at commanded 40 percent duty with measured scheduler timing'
+  $warm=Measure-DutyPhase 0.40 'CONTROLLED_WARMUP_40' 3 6
+  $warmPass=(
+    $warm.sampler_samples-ge15 -and
+    $warm.pool_ready_fraction-ge0.80 -and
+    $warm.fresh_positive_hash_samples-ge1 -and
+    $null-ne$warm.fresh_hash_median_mhs -and
+    [double]$warm.fresh_hash_median_mhs-gt0 -and
+    $warm.actual_duty_error-le0.06
+  )
+  $warmEvidence=@{
+    commanded_duty=0.40
+    actual_duty_mean=$warm.actual_duty_mean
+    actual_duty_error=$warm.actual_duty_error
+    sampler_samples=[int]$warm.sampler_samples
+    sampler_util_mean_pct=$warm.sampler_util_mean_pct
+    sampler_power_mean_w=$warm.sampler_power_mean_w
+    fresh_positive_hash_samples=[int]$warm.fresh_positive_hash_samples
+    fresh_hash_median_mhs=$warm.fresh_hash_median_mhs
+    pool_ready_fraction=$warm.pool_ready_fraction
+    min_suspended_threads=[int]$warm.min_suspended_threads
+  }
+  $script:lastLearningEvidence=$warmEvidence
+  $warmResult=[ordered]@{
+    schema_version='3.0'
+    release=$Release
+    status=if($warmPass){'PASS_CONTROLLED_40_WARMUP'}else{'FAIL_CONTROLLED_40_WARMUP'}
+    measurement=$warm
+    sampler_strategy='INDEPENDENT_NVIDIA_SMI_LOOP_200MS'
+    hashrate_strategy='PHASE_LOCAL_NATIVE_LOG_LINES_AFTER_SETTLE'
+    scheduler_strategy='EXPLICIT_DOUBLE_DUTY_SCHEDULE_R065'
+  }
+  $warmResult|ConvertTo-Json -Depth 30|Set-Content -LiteralPath (Join-Path $state 'WARMUP_RESULT.json') -Encoding utf8
+  if(-not$warmPass){
+    throw ('Controlled 40 warmup evidence failed: sampler='+$warm.sampler_samples+' poolFraction='+[Math]::Round($warm.pool_ready_fraction,2)+' freshHashCount='+$warm.fresh_positive_hash_samples+' actualDuty='+[Math]::Round($warm.actual_duty_mean,3))
+  }
+  Pass-LearningStage 'GPU_CONTROLLED_WARMUP_40' 'Prove fresh productive 40 percent duty' 'CONTROLLED_40_PRODUCTIVE' '40 percent duty produced fresh phase-local hashrate, pool continuity and scheduler timing within tolerance.' $warmEvidence
+
+  Start-LearningStage 'GPU_CALIBRATION_10' 'Measure fresh 10 percent duty phase'
+  $p10=Measure-DutyPhase 0.10 'CALIBRATION_10' 4 10
+  $p10Ev=@{
+    commanded_duty=0.10;actual_duty_mean=$p10.actual_duty_mean;actual_duty_error=$p10.actual_duty_error;
+    sampler_samples=[int]$p10.sampler_samples;util_mean_pct=$p10.sampler_util_mean_pct;power_mean_w=$p10.sampler_power_mean_w;
+    fresh_positive_hash_samples=[int]$p10.fresh_positive_hash_samples;fresh_hash_median_mhs=$p10.fresh_hash_median_mhs;
+    pool_ready_fraction=$p10.pool_ready_fraction;min_suspended_threads=[int]$p10.min_suspended_threads
+  }
+  Pass-LearningStage 'GPU_CALIBRATION_10' 'Measure 10 percent phase' 'PHASE_MEASURED' '10 percent phase completed; stability is decided only after all phases are measured.' $p10Ev
+
+  Start-LearningStage 'GPU_CALIBRATION_25' 'Measure fresh 25 percent duty phase'
+  $p25=Measure-DutyPhase 0.25 'CALIBRATION_25' 4 10
+  $p25Ev=@{
+    commanded_duty=0.25;actual_duty_mean=$p25.actual_duty_mean;actual_duty_error=$p25.actual_duty_error;
+    sampler_samples=[int]$p25.sampler_samples;util_mean_pct=$p25.sampler_util_mean_pct;power_mean_w=$p25.sampler_power_mean_w;
+    fresh_positive_hash_samples=[int]$p25.fresh_positive_hash_samples;fresh_hash_median_mhs=$p25.fresh_hash_median_mhs;
+    pool_ready_fraction=$p25.pool_ready_fraction;min_suspended_threads=[int]$p25.min_suspended_threads
+  }
+  Pass-LearningStage 'GPU_CALIBRATION_25' 'Measure 25 percent phase' 'PHASE_MEASURED' '25 percent phase completed.' $p25Ev
+
+  Start-LearningStage 'GPU_CALIBRATION_40' 'Measure fresh 40 percent duty phase'
+  $p40=Measure-DutyPhase 0.40 'CALIBRATION_40' 4 10
+  $p40Ev=@{
+    commanded_duty=0.40;actual_duty_mean=$p40.actual_duty_mean;actual_duty_error=$p40.actual_duty_error;
+    sampler_samples=[int]$p40.sampler_samples;util_mean_pct=$p40.sampler_util_mean_pct;power_mean_w=$p40.sampler_power_mean_w;
+    fresh_positive_hash_samples=[int]$p40.fresh_positive_hash_samples;fresh_hash_median_mhs=$p40.fresh_hash_median_mhs;
+    pool_ready_fraction=$p40.pool_ready_fraction;min_suspended_threads=[int]$p40.min_suspended_threads
+  }
+  Pass-LearningStage 'GPU_CALIBRATION_40' 'Measure 40 percent phase' 'PHASE_MEASURED' '40 percent phase completed.' $p40Ev
+  $phaseResults=@($p10,$p25,$p40)
+
+  Start-LearningStage 'GPU_CALIBRATION_ACCEPTANCE' 'Decide whether measured 10/25/40 surface supports a useful live range'
+  $samplerOk=(@($phaseResults|Where-Object{$_.sampler_samples-lt30}).Count-eq0)
+  $schedulerOk=(@($phaseResults|Where-Object{$null-eq$_.actual_duty_mean -or $_.actual_duty_error-gt0.06}).Count-eq0)
+  $threadControl=(@($phaseResults|Where-Object{$_.min_suspended_threads-le0}).Count-eq0)
+
+  foreach($p in $phaseResults){
+    $stable=(
+      $p.pool_ready_fraction-ge0.80 -and
+      $p.fresh_positive_hash_samples-ge2 -and
+      $null-ne$p.fresh_hash_median_mhs -and
+      [double]$p.fresh_hash_median_mhs-gt0
+    )
+    $p|Add-Member -NotePropertyName stable_productive -NotePropertyValue $stable
+  }
+
+  $stableFloor=$null
+  foreach($candidate in @($p10,$p25,$p40)){
+    if($candidate.stable_productive){$stableFloor=[double]$candidate.duty;break}
+  }
+
+  $powerEffect=$null
+  $utilEffect=$null
+  if($null-ne$p10.sampler_power_mean_w -and $null-ne$p40.sampler_power_mean_w){
+    $powerEffect=[double]$p40.sampler_power_mean_w-[double]$p10.sampler_power_mean_w
+  }
+  if($null-ne$p10.sampler_util_mean_pct -and $null-ne$p40.sampler_util_mean_pct){
+    $utilEffect=[double]$p40.sampler_util_mean_pct-[double]$p10.sampler_util_mean_pct
+  }
+  $controlEffect=(
+    ($null-ne$powerEffect -and $powerEffect-ge8.0) -or
+    ($null-ne$utilEffect -and $utilEffect-ge12.0)
+  )
+
+  $powerMonotonic=$null
+  $utilMonotonic=$null
+  if($null-ne$p10.sampler_power_mean_w -and $null-ne$p25.sampler_power_mean_w -and $null-ne$p40.sampler_power_mean_w){
+    $powerMonotonic=(
+      [double]$p25.sampler_power_mean_w+5.0-ge[double]$p10.sampler_power_mean_w -and
+      [double]$p40.sampler_power_mean_w+5.0-ge[double]$p25.sampler_power_mean_w
+    )
+  }
+  if($null-ne$p10.sampler_util_mean_pct -and $null-ne$p25.sampler_util_mean_pct -and $null-ne$p40.sampler_util_mean_pct){
+    $utilMonotonic=(
+      [double]$p25.sampler_util_mean_pct+10.0-ge[double]$p10.sampler_util_mean_pct -and
+      [double]$p40.sampler_util_mean_pct+10.0-ge[double]$p25.sampler_util_mean_pct
+    )
+  }
+
+  $p40Stable=[bool]$p40.stable_productive
+  $lowerStable=($null-ne$stableFloor -and [double]$stableFloor-lt0.40)
+
+  $calibration=[ordered]@{
+    schema_version='3.0'
+    release=$Release
+    scheduler_strategy='EXPLICIT_DOUBLE_DUTY_SCHEDULE_R065'
+    sampler_strategy='INDEPENDENT_NVIDIA_SMI_LOOP_200MS'
+    sampler_sensor_note='poll interval is not assumed equal to NVIDIA sensor refresh; phase aggregates are decision evidence'
+    phase_hashrate_strategy='fresh native-log Average speed lines written only after each phase settling boundary'
+    phases=$phaseResults
+    sampler_ok=$samplerOk
+    scheduler_timing_ok=$schedulerOk
+    thread_suspend_control=$threadControl
+    p40_stable_productive=$p40Stable
+    minimum_stable_productive_duty=$stableFloor
+    lower_than_40_stable_productive=$lowerStable
+    power_effect_40_minus_10_w=$powerEffect
+    util_effect_40_minus_10_pct=$utilEffect
+    measured_control_effect=$controlEffect
+    power_monotonic_with_tolerance=$powerMonotonic
+    util_monotonic_with_tolerance=$utilMonotonic
+    blocking_acceptance=(
+      $samplerOk -and $schedulerOk -and $threadControl -and
+      $p40Stable -and $lowerStable -and $controlEffect
+    )
+  }
+  $calibration|ConvertTo-Json -Depth 30|Set-Content -LiteralPath (Join-Path $state 'CALIBRATION_RESULT.json') -Encoding utf8
+  $calEv=@{
+    sampler_ok=[bool]$samplerOk;scheduler_timing_ok=[bool]$schedulerOk;thread_suspend_control=[bool]$threadControl;
+    p40_stable_productive=[bool]$p40Stable;minimum_stable_productive_duty=$stableFloor;lower_than_40_stable_productive=[bool]$lowerStable;
+    power_effect_40_minus_10_w=$powerEffect;util_effect_40_minus_10_pct=$utilEffect;measured_control_effect=[bool]$controlEffect;
+    power_monotonic_with_tolerance=$powerMonotonic;util_monotonic_with_tolerance=$utilMonotonic
+  }
+  $script:lastLearningEvidence=$calEv
+  if(-not$calibration.blocking_acceptance){
+    throw ('GPU RC16 calibrated measurement did not prove usable live range: sampler='+$samplerOk+' scheduler='+$schedulerOk+' thread='+$threadControl+' p40='+$p40Stable+' lowerStable='+$lowerStable+' controlEffect='+$controlEffect)
+  }
+  Pass-LearningStage 'GPU_CALIBRATION_ACCEPTANCE' 'Decide usable live range' 'CONTROL_SURFACE_ACCEPTED' 'Measured 10/25/40 surface contains productive 40 percent, at least one productive lower duty, correct scheduler timing and a measurable control effect.' $calEv
+
+  $script:minDuty=[double]$stableFloor
+  $calibrationPass=$true
+  $currentDuty=$maxDuty
+  $recoverClear=0
+  Stop-GpuSampler
+  Write-LearningState 'GPU_LIVE' 'ACTIVE_CONTINUOUS' 'LIVE_PROMOTED' 'GPU lane promoted after complete calibration evidence.' @{
+    max_duty=[double]$maxDuty
+    minimum_stable_productive_duty=[double]$script:minDuty
+    calibration_pass=$true
+  }
+
+  while($true){
+    if(Test-Path -LiteralPath $stopRequest){
+      Write-LearningState 'GPU_LIVE' 'STOP_REQUESTED' 'STOP_MARKER_SEEN' 'GPU supervisor observed stop request.' @{current_duty=[double]$currentDuty}
+      break
+    }
+    if($miner.HasExited){throw ('lolMiner exited unexpectedly code='+$miner.ExitCode)}
+
+    $row=Run-DutyCycle $currentDuty 'ACTIVE_CONTINUOUS' $cycleMs $false
+    $g=$row.off_gpu
+    $fg=$row.foreground_gpu
+    $pressure=0.0
+
+    if($fg.ok){
+      $pressure=[Math]::Max($pressure,[Math]::Min(1.0,[double]$fg.util_pct/100.0))
+    }elseif($g.ok -and $null-ne$g.util_pct){
+      $pressure=[Math]::Max($pressure,[Math]::Min(1.0,[double]$g.util_pct/100.0))
+    }
+
+    $hardPause=$false
+    if($g.ok){
+      $free=[double]$g.memory_total_mb-[double]$g.memory_used_mb
+      if($null-ne$g.temp_c -and [double]$g.temp_c-ge75){$hardPause=$true}
+      if($free-lt512){$hardPause=$true}
+    }
+
+    $rawDesired=$maxDuty*(1.0-$pressure)
+    if($hardPause -or $pressure-ge0.95){
