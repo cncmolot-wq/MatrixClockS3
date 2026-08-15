@@ -45,9 +45,11 @@ jobs:
           /tmp/pwsh763/pwsh -NoProfile -File ci/miningsniper/diagnose_rc16_payload_parse.ps1 -MainPath RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
           cat RC16_PAYLOAD_PARSE_DIAGNOSTIC.json
 
-      - name: Upload forensic receipt
+      - name: Upload forensic receipt and exact rejected artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MiningSniper-RC16-rejected-payload-parse-diagnostic
-          path: RC16_PAYLOAD_PARSE_DIAGNOSTIC.json
+          name: MiningSniper-RC16-rejected-exact-forensic
+          path: |
+            RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
+            RC16_PAYLOAD_PARSE_DIAGNOSTIC.json
           if-no-files-found: error
