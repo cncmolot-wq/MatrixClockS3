@@ -1,0 +1,53 @@
+name: MiningSniper RC16 payload parse diagnostic
+
+on:
+  push:
+    branches:
+      - miningsniper-ci-rc16-final
+    paths:
+      - '.github/workflows/miningsniper-rc16-payload-parse-diagnostic.yml'
+      - 'ci/miningsniper/diagnose_rc16_payload_parse.ps1'
+
+jobs:
+  payload-parse-diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct rejected immutable RC16 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='https://raw.githubusercontent.com/cncmolot-wq/MatrixClockS3/miningsniper-ci-r0651/ci/miningsniper/rc16_exact_parts'
+          : > RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
+          for p in part00.txt part01.txt part02.txt part03.txt part04.txt; do
+            curl -L --fail --retry 3 "$base/$p" >> RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
+          done
+          echo '60141bc4647121b14fe5b39bdeb0ae922ec0937b204fea382af0e36153caef76  RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1' | sha256sum -c -
+
+      - name: Install exact PowerShell 7.6.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/powershell-7.6.3-linux-x64.tar.gz'
+          expected='856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7'
+          curl -L --fail --retry 3 -o /tmp/powershell-7.6.3-linux-x64.tar.gz "$url"
+          echo "$expected  /tmp/powershell-7.6.3-linux-x64.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/pwsh763
+          tar -xzf /tmp/powershell-7.6.3-linux-x64.tar.gz -C /tmp/pwsh763
+          chmod +x /tmp/pwsh763/pwsh
+          test "$(/tmp/pwsh763/pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')" = '7.6.3'
+
+      - name: Enumerate every embedded payload parse error
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/pwsh763/pwsh -NoProfile -File ci/miningsniper/diagnose_rc16_payload_parse.ps1 -MainPath RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
+          cat RC16_PAYLOAD_PARSE_DIAGNOSTIC.json
+
+      - name: Upload forensic receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiningSniper-RC16-rejected-payload-parse-diagnostic
+          path: RC16_PAYLOAD_PARSE_DIAGNOSTIC.json
+          if-no-files-found: error
