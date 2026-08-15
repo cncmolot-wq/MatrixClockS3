@@ -1,0 +1,21 @@
+name: MiningSniper RC16 ExportPayload AST diagnostic
+on:
+  push:
+    branches: [miningsniper-rc16-recover]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run AST diagnostic
+        shell: pwsh
+        run: |
+          ./ci/miningsniper/diagnose_exportpayload_assignments.ps1 -PwshPath pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: miningsniper-rc16-export-ast-diagnostic
+          path: ci/miningsniper/diag_out/EXPORTPAYLOAD_AST_DIAGNOSTIC.json
+          if-no-files-found: error
