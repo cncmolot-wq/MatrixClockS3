@@ -24,6 +24,7 @@ jobs:
         run: |
           ./ci/miningsniper/fixup_rebuild_validator.ps1 -PwshPath /tmp/pwsh/pwsh
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: miningsniper-rc16-rebuilt
           path: |
@@ -31,4 +32,4 @@ jobs:
             ci/miningsniper/out/RC16_REBUILD_VALIDATION.json
             ci/miningsniper/out/DUTY_RESULT.json
             ci/miningsniper/out/HASHRATE_RESULT.json
-          if-no-files-found: error
+          if-no-files-found: warn
