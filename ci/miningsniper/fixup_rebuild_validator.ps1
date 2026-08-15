@@ -45,7 +45,10 @@ $first=$text.IndexOf($old,[StringComparison]::Ordinal)
 $last=$text.LastIndexOf($old,[StringComparison]::Ordinal)
 if($first-lt0-or$first-ne$last){throw ('Expected exactly one old replacement function, first='+$first+' last='+$last)}
 $patched=$text.Substring(0,$first)+$new+$text.Substring($first+$old.Length)
-$needle="$text=Replace-PayloadAssignment $text 'ExportPayload' $export"
+$needle=@'
+$text=Replace-PayloadAssignment $text 'ExportPayload' $export
+'@
+$needle=$needle.Trim()
 $insert=@'
 foreach($dupName in @('StopPayload','StatusPayload')){
   $effective=Get-EffectivePayloadValue $text $dupName
@@ -53,6 +56,7 @@ foreach($dupName in @('StopPayload','StatusPayload')){
 }
 $text=Replace-PayloadAssignment $text 'ExportPayload' $export
 '@
+$insert=$insert.Trim()
 $n1=$patched.IndexOf($needle,[StringComparison]::Ordinal);$n2=$patched.LastIndexOf($needle,[StringComparison]::Ordinal)
 if($n1-lt0-or$n1-ne$n2){throw ('Expected one ExportPayload replacement call, first='+$n1+' last='+$n2)}
 $patched=$patched.Substring(0,$n1)+$insert+$patched.Substring($n1+$needle.Length)
