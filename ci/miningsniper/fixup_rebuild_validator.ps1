@@ -60,6 +60,16 @@ $insert=$insert.Trim()
 $n1=$patched.IndexOf($needle,[StringComparison]::Ordinal);$n2=$patched.LastIndexOf($needle,[StringComparison]::Ordinal)
 if($n1-lt0-or$n1-ne$n2){throw ('Expected one ExportPayload replacement call, first='+$n1+' last='+$n2)}
 $patched=$patched.Substring(0,$n1)+$insert+$patched.Substring($n1+$needle.Length)
+$badApi=@'
+$apiFixture=[pscustomobject]@{ok=$true;data=[pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239}}
+'@
+$goodApi=@'
+$apiFixture=[pscustomobject]@{ok=$true;data=[pscustomobject]@{Algorithms=@([pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239})}}
+'@
+$badApi=$badApi.Trim();$goodApi=$goodApi.Trim()
+$a1=$patched.IndexOf($badApi,[StringComparison]::Ordinal);$a2=$patched.LastIndexOf($badApi,[StringComparison]::Ordinal)
+if($a1-lt0-or$a1-ne$a2){throw ('Expected one bad API fixture, first='+$a1+' last='+$a2)}
+$patched=$patched.Substring(0,$a1)+$goodApi+$patched.Substring($a1+$badApi.Length)
 [IO.File]::WriteAllText($tmp,$patched,[Text.UTF8Encoding]::new($false))
 $tok=$null;$err=$null;[void][Management.Automation.Language.Parser]::ParseFile($tmp,[ref]$tok,[ref]$err)
 if($err.Count-gt0){throw ('Generated validator ParseFile failed: '+(($err|ForEach-Object{$_.ErrorId+':'+$_.Message})-join' | '))}
