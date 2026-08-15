@@ -70,6 +70,34 @@ $badApi=$badApi.Trim();$goodApi=$goodApi.Trim()
 $a1=$patched.IndexOf($badApi,[StringComparison]::Ordinal);$a2=$patched.LastIndexOf($badApi,[StringComparison]::Ordinal)
 if($a1-lt0-or$a1-ne$a2){throw ('Expected one bad API fixture, first='+$a1+' last='+$a2)}
 $patched=$patched.Substring(0,$a1)+$goodApi+$patched.Substring($a1+$badApi.Length)
+$oldForbidden=@'
+if($text -match '(?i)WinRing0|Add-MpPreference|Set-MpPreference|--pl|--cclk|--mclk|--coff|--moff'){throw 'Forbidden runtime token'}
+'@
+$newForbidden=@'
+$unsafeCommandNames=@('Add-MpPreference','Set-MpPreference')
+$unsafeCommands=[Collections.Generic.List[string]]::new()
+foreach($scopeAst in @($mainAst,$supAst)){
+  foreach($cmd in @($scopeAst.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true))){
+    $name=$cmd.GetCommandName()
+    if($null-ne$name -and $unsafeCommandNames-contains$name){$unsafeCommands.Add($name)}
+  }
+}
+if($unsafeCommands.Count-gt0){throw ('Forbidden executable command: '+(($unsafeCommands|Sort-Object -Unique)-join','))}
+$unsafeArgs=[Collections.Generic.List[string]]::new()
+foreach($cmd in @($supAst.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true))){
+  foreach($el in @($cmd.CommandElements)){
+    if($el -is [Management.Automation.Language.StringConstantExpressionAst]){
+      $v=[string]$el.Value
+      if($v-match'(?i)WinRing0' -or $v-match'^(?i:--pl|--cclk|--mclk|--coff|--moff)$'){$unsafeArgs.Add($v)}
+    }
+  }
+}
+if($unsafeArgs.Count-gt0){throw ('Forbidden production command argument: '+(($unsafeArgs|Sort-Object -Unique)-join','))}
+'@
+$oldForbidden=$oldForbidden.Trim();$newForbidden=$newForbidden.Trim()
+$f1=$patched.IndexOf($oldForbidden,[StringComparison]::Ordinal);$f2=$patched.LastIndexOf($oldForbidden,[StringComparison]::Ordinal)
+if($f1-lt0-or$f1-ne$f2){throw ('Expected one whole-source forbidden scan, first='+$f1+' last='+$f2)}
+$patched=$patched.Substring(0,$f1)+$newForbidden+$patched.Substring($f1+$oldForbidden.Length)
 [IO.File]::WriteAllText($tmp,$patched,[Text.UTF8Encoding]::new($false))
 $tok=$null;$err=$null;[void][Management.Automation.Language.Parser]::ParseFile($tmp,[ref]$tok,[ref]$err)
 if($err.Count-gt0){throw ('Generated validator ParseFile failed: '+(($err|ForEach-Object{$_.ErrorId+':'+$_.Message})-join' | '))}
