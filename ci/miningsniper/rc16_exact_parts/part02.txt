@@ -1,0 +1,417 @@
+NetTCPConnection -OwningProcess $ProcessId -ErrorAction SilentlyContinue)
+    $rows=@();$poolEstablished=$false;$poolAny=$false
+    foreach($x in $c){
+      $stateName=[string]$x.State
+      $rows+=[pscustomobject][ordered]@{remote=[string]$x.RemoteAddress;port=[int]$x.RemotePort;state=$stateName}
+      if([int]$x.RemotePort-eq20128){$poolAny=$true;if($stateName-eq'Established'){$poolEstablished=$true}}
+    }
+    return [pscustomobject][ordered]@{ok=$true;pool_20128=$poolEstablished;pool_20128_any_state=$poolAny;connections=$rows;error=$null}
+  }catch{
+    return [pscustomobject][ordered]@{ok=$false;pool_20128=$false;pool_20128_any_state=$false;connections=@();error=$_.Exception.Message}
+  }
+}
+function Test-Pool20128([object]$Net){
+  if($null-eq$Net){return $false}
+  try{
+    if($Net -is [Collections.IDictionary]){
+      if($Net.Contains('pool_20128')){return [bool]$Net['pool_20128']}
+      return $false
+    }
+    $p=$Net.PSObject.Properties['pool_20128']
+    if($null-eq$p){return $false}
+    return [bool]$p.Value
+  }catch{return $false}
+}
+function Start-Miner{
+  $args=@('--algo','ETCHASH','--pool',[string]$r.pool,'--tls','on','--user',[string]$r.wallet,'--pass',[string]$r.pass,'--ethstratum','ETHV1','--devices','0','--mode','b','--keepfree','512','--apiport',[string]$apiPort,'--apihost','127.0.0.1','--shortstats','5','--longstats','30','--timeprint','on','--log','on','--logfile',[string]$r.native_log_file,'--watchdog','exit','--tstop','75','--tstart','60','--tmode','edge','--nocolor')
+  $p=Start-Process -FilePath $lol -ArgumentList $args -WorkingDirectory ([string]$r.release_dir) -WindowStyle Hidden -RedirectStandardOutput ([string]$r.stdout_file) -RedirectStandardError ([string]$r.stderr_file) -PassThru
+  Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii
+  return $p
+}
+function Attach-DutyController([Diagnostics.Process]$Process){
+  if($null-ne$script:dutyController){throw 'Duty controller already attached'}
+  $script:dutyController=[MsThreadDutyController]::new($Process.Id)
+  $null=$script:dutyController.Suspend()
+  return $script:dutyController.SuspendedThreadCount
+}
+function Stop-Miner{
+  if($null-ne$script:dutyController){try{$script:dutyController.Resume()}catch{};try{$script:dutyController.Dispose()}catch{};$script:dutyController=$null}
+  if(Test-Path -LiteralPath $pidFile){
+    try{$id=[int](Get-Content -Raw -LiteralPath $pidFile);$p=Get-Process -Id $id -ErrorAction SilentlyContinue;if($null-ne$p){Stop-Process -Id $id -Force -ErrorAction SilentlyContinue}}catch{}
+  }
+  Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+}
+function Day-Dirs([datetime]$u){
+  $raw=Join-Path (Join-Path (Join-Path $rawRoot $u.ToString('yyyy')) $u.ToString('MM')) $u.ToString('dd')
+  $rep=Join-Path (Join-Path (Join-Path $reportRoot $u.ToString('yyyy')) $u.ToString('MM')) $u.ToString('dd')
+  New-Item -ItemType Directory -Force -Path $raw,$rep|Out-Null
+  return [pscustomobject]@{raw=$raw;reports=$rep}
+}
+function Start-Segment([datetime]$u){
+  $d=Day-Dirs $u;$script:currentHour=$u.ToString('yyyyMMddTHH');$script:currentOpen=Join-Path $d.raw ('segment_'+$script:currentHour+'Z_'+$sessionId+'.jsonl.open');New-Item -ItemType File -Force -Path $script:currentOpen|Out-Null
+}
+function Close-Segment([string]$reason){
+  if([string]::IsNullOrWhiteSpace($script:currentOpen)-or(-not(Test-Path -LiteralPath $script:currentOpen))){return}
+  $final=$script:currentOpen.Substring(0,$script:currentOpen.Length-5);Move-Item -LiteralPath $script:currentOpen -Destination $final -Force
+  $sha=(Get-FileHash -Algorithm SHA256 -LiteralPath $final).Hash.ToLowerInvariant();$rep=[ordered]@{schema_version='1.0';release=$Release;session_id=$sessionId;close_reason=$reason;raw_file=$final;raw_sha256=$sha;closed_utc=(Get-Date).ToUniversalTime().ToString('o')}
+  $dirs=Day-Dirs (Get-Date).ToUniversalTime();$rp=Join-Path $dirs.reports (([IO.Path]::GetFileNameWithoutExtension($final))+'.report.json');$rep|ConvertTo-Json -Depth 10|Set-Content -LiteralPath $rp -Encoding utf8
+  Add-Content -LiteralPath $manifestFile -Value (([ordered]@{raw=$final;raw_sha256=$sha;report=$rp;closed_utc=$rep.closed_utc})|ConvertTo-Json -Compress) -Encoding utf8
+  Copy-Item -LiteralPath $rp -Destination $latestClosed -Force;$script:currentOpen=$null
+}
+function Add-Row([hashtable]$row){
+  $utc=(Get-Date).ToUniversalTime();$hour=$utc.ToString('yyyyMMddTHH');if($null-eq$currentOpen){Start-Segment $utc}elseif($hour-ne$currentHour){Close-Segment 'UTC_HOUR_ROLLOVER';Start-Segment $utc}
+  Add-Content -LiteralPath $currentOpen -Value ($row|ConvertTo-Json -Depth 30 -Compress) -Encoding utf8
+}
+function Write-Health(
+  [string]$Mode,
+  [double]$DutyTarget,
+  [object]$Gpu,
+  [object]$Fg,
+  [object]$Net,
+  [bool]$CalibrationPass,
+  [object]$HashrateMhs,
+  [string]$HashrateSource
+){
+  $h=[ordered]@{
+    utc=(Get-Date).ToUniversalTime().ToString('o')
+    release=$Release
+    mode=$Mode
+    supervisor_pid=$PID
+    miner_pid=if($null-ne$miner){$miner.Id}else{$null}
+    normalized_duty_target=[Math]::Round($DutyTarget,3)
+    max_envelope=$maxDuty
+    gpu=$Gpu
+    foreground=$Fg
+    network=$Net
+    calibration_pass=$CalibrationPass
+    loop_samples=$loopSamples
+    api_port=$apiPort
+    hashrate_mhs=$HashrateMhs
+    hashrate_source=$HashrateSource
+  }
+  $h|ConvertTo-Json -Depth 30|Set-Content ($healthFile+'.tmp') -Encoding utf8
+  Move-Item ($healthFile+'.tmp') $healthFile -Force
+}
+function Run-ProductiveBootstrap([Diagnostics.Process]$Process,[int]$MaxSeconds=75){
+  $started=(Get-Date).ToUniversalTime();$deadline=(Get-Date).AddSeconds($MaxSeconds);$sampleIndex=0
+  $everHash=$false;$everPoolEstablished=$false;$everPoolAny=$false;$everApi=$false
+  $maxGpuUtil=0.0;$maxPower=0.0;$maxMem=0.0;$maxTemp=0.0;$tail=[Collections.Generic.List[object]]::new()
+  while((Get-Date)-lt$deadline){
+    if($Process.HasExited){throw ('lolMiner exited during continuous bootstrap code='+$Process.ExitCode)}
+    $g=Get-NvidiaRow;$fg=Get-ForegroundEnginePct $Process.Id;$net=Get-NetworkState $Process.Id;$api=if(($sampleIndex%4)-eq0){Get-LolApi}else{$null};$hashObs=Get-LolHashrateObservation $api;$hash=$hashObs.mhs;$heartbeat=Get-HeartbeatMs
+    $freeMb=if($g.ok){[double]$g.memory_total_mb-[double]$g.memory_used_mb}else{$null}
+    if($g.ok){
+      if($null-ne$g.util_pct){$maxGpuUtil=[Math]::Max($maxGpuUtil,[double]$g.util_pct)};if($null-ne$g.power_w){$maxPower=[Math]::Max($maxPower,[double]$g.power_w)};if($null-ne$g.memory_used_mb){$maxMem=[Math]::Max($maxMem,[double]$g.memory_used_mb)};if($null-ne$g.temp_c){$maxTemp=[Math]::Max($maxTemp,[double]$g.temp_c)}
+      if($null-ne$g.temp_c -and [double]$g.temp_c-ge75){throw 'GPU bootstrap thermal safety stop >=75C'};if($null-ne$freeMb -and [double]$freeMb-lt512){throw 'GPU bootstrap VRAM free headroom below 512 MB'}
+    }
+    if([double]$heartbeat-ge1500){throw 'GPU bootstrap host responsiveness safety stop: heartbeat >=1500 ms'}
+    $hashReady=($null-ne$hash -and [double]$hash-gt0);$poolReady=(Test-Pool20128 $net);$poolAny=$false;try{$poolAny=[bool]$net.pool_20128_any_state}catch{};$apiReady=($null-ne$api -and $api.ok)
+    if($hashReady){$everHash=$true};if($poolReady){$everPoolEstablished=$true};if($poolAny){$everPoolAny=$true};if($apiReady){$everApi=$true}
+    $row=[ordered]@{utc=(Get-Date).ToUniversalTime().ToString('o');release=$Release;session_id=$sessionId;mode='BOOTSTRAP_CONTINUOUS_UNTHROTTLED_INITIALIZATION';normalized_duty_target=$null;gpu=$g;foreground_gpu=$fg;vram_free_mb=$freeMb;heartbeat_ms=[Math]::Round($heartbeat,3);network=$net;api=$api;hashrate_mhs=$hash;hashrate_source=$hashObs.source;hashrate_raw=$hashObs.raw;hash_ready=$hashReady;pool_ready=$poolReady;pool_any_state=$poolAny;miner_alive=(-not$Process.HasExited);suspended_threads=0}
+    Add-Row $row;$script:loopSamples++;Write-Health 'BOOTSTRAP_CONTINUOUS_UNTHROTTLED_INITIALIZATION' 1.0 $g $fg $net $false $hashObs.mhs $hashObs.source;$tail.Add([pscustomobject]$row);while($tail.Count-gt12){$tail.RemoveAt(0)}
+    if($hashReady-and$poolReady){
+      $result=[ordered]@{schema_version='1.0';release=$Release;status='PASS_PRODUCTIVE_BOOTSTRAP';started_utc=$started.ToString('o');completed_utc=(Get-Date).ToUniversalTime().ToString('o');wall_seconds=[Math]::Round(((Get-Date).ToUniversalTime()-$started).TotalSeconds,3);ever_hash_positive=$everHash;ever_pool_established=$everPoolEstablished;ever_pool_any_state=$everPoolAny;ever_api_ready=$everApi;last_hashrate_mhs=$hash;last_hashrate_source=$hashObs.source;last_hashrate_raw=$hashObs.raw;max_gpu_util_pct=$maxGpuUtil;max_power_w=$maxPower;max_memory_used_mb=$maxMem;max_temp_c=$maxTemp;native_log_tail=(Get-NativeLogTail 60);recent_samples=@($tail)}
+      $result|ConvertTo-Json -Depth 30|Set-Content -LiteralPath (Join-Path $state 'BOOTSTRAP_RESULT.json') -Encoding utf8;return [pscustomobject]$result
+    }
+    $sampleIndex++;Start-Sleep -Milliseconds 750
+  }
+  $fail=[ordered]@{schema_version='1.0';release=$Release;status='FAIL_BOOTSTRAP_NOT_PRODUCTIVE';started_utc=$started.ToString('o');completed_utc=(Get-Date).ToUniversalTime().ToString('o');wall_seconds=[Math]::Round(((Get-Date).ToUniversalTime()-$started).TotalSeconds,3);ever_hash_positive=$everHash;ever_pool_established=$everPoolEstablished;ever_pool_any_state=$everPoolAny;ever_api_ready=$everApi;max_gpu_util_pct=$maxGpuUtil;max_power_w=$maxPower;max_memory_used_mb=$maxMem;max_temp_c=$maxTemp;native_log_tail=(Get-NativeLogTail 100);recent_samples=@($tail)}
+  $fail|ConvertTo-Json -Depth 30|Set-Content -LiteralPath (Join-Path $state 'BOOTSTRAP_RESULT.json') -Encoding utf8
+  throw ('GPU bootstrap failed: hash='+$everHash+' poolEstablished='+$everPoolEstablished+' poolAnyState='+$everPoolAny+' api='+$everApi+' maxPowerW='+[Math]::Round($maxPower,1)+' maxMemMB='+[Math]::Round($maxMem,0))
+}
+function Get-DutySchedule([double]$DutyFraction,[int]$CycleLengthMs){
+  if($CycleLengthMs-le0){throw 'Duty cycle length must be > 0 ms'}
+  $clamped=[double]$DutyFraction
+  if([double]::IsNaN($clamped)-or[double]::IsInfinity($clamped)){throw 'Duty fraction must be finite'}
+  if($clamped-lt0.0){$clamped=0.0}
+  elseif($clamped-gt1.0){$clamped=1.0}
+  $activeMs=[int][Math]::Round(($clamped*[double]$CycleLengthMs),0,[MidpointRounding]::AwayFromZero)
+  if($activeMs-lt0){$activeMs=0}
+  elseif($activeMs-gt$CycleLengthMs){$activeMs=$CycleLengthMs}
+  return [pscustomobject][ordered]@{
+    requested_duty=[double]$DutyFraction
+    clamped_duty=$clamped
+    cycle_ms=$CycleLengthMs
+    active_ms=$activeMs
+  }
+}
+function Invoke-DutyWindow([object]$Controller,[double]$DutyFraction,[int]$CycleLengthMs){
+  $schedule=Get-DutySchedule $DutyFraction $CycleLengthMs
+  $awakeElapsed=0.0
+  $resumeResult=0
+  $suspendResult=0
+  if([int]$schedule.active_ms-gt0){
+    $resumeResult=[int]$Controller.Resume()
+    $awakeSw=[Diagnostics.Stopwatch]::StartNew()
+    Start-Sleep -Milliseconds ([int]$schedule.active_ms)
+    $awakeSw.Stop()
+    $awakeElapsed=$awakeSw.Elapsed.TotalMilliseconds
+    $suspendResult=[int]$Controller.Suspend()
+  }
+  $actualDuty=if($CycleLengthMs-gt0){$awakeElapsed/[double]$CycleLengthMs}else{0.0}
+  if($actualDuty-lt0.0){$actualDuty=0.0}
+  elseif($actualDuty-gt1.0){$actualDuty=1.0}
+  return [pscustomobject][ordered]@{
+    schedule=$schedule
+    resume_result=$resumeResult
+    suspend_result=$suspendResult
+    actual_awake_ms=$awakeElapsed
+    actual_duty_fraction=$actualDuty
+  }
+}
+function Run-DutyCycle([double]$Target,[string]$Mode,[int]$CycleLengthMs=1000,[bool]$ProbeActive=$false){
+  $cycleSw=[Diagnostics.Stopwatch]::StartNew()
+  $null=$script:dutyController.Suspend()
+  Start-Sleep -Milliseconds 180
+
+  $offGpu=Get-NvidiaRow
+  $fg=Get-ForegroundEnginePct $miner.Id
+  $heartbeat=Get-HeartbeatMs
+  $freeMb=if($offGpu.ok){[double]$offGpu.memory_total_mb-[double]$offGpu.memory_used_mb}else{$null}
+
+  if($offGpu.ok){$script:telemetryFailures=0}else{$script:telemetryFailures++}
+  if($telemetryFailures-ge3){throw 'GPU telemetry backend failed 3 consecutive cycles; refusing blind mining'}
+  if($offGpu.ok){
+    if($null-ne$offGpu.temp_c -and [double]$offGpu.temp_c-ge75){throw 'GPU thermal safety stop >=75C'}
+    if($null-ne$freeMb -and [double]$freeMb-lt512){throw 'GPU VRAM free headroom below 512 MB'}
+  }
+  if([double]$heartbeat-ge1500){throw 'Host responsiveness safety stop: heartbeat >=1500 ms'}
+
+  $window=Invoke-DutyWindow $script:dutyController $Target $CycleLengthMs
+  $awakeElapsed=[double]$window.actual_awake_ms
+  $actualDuty=[double]$window.actual_duty_fraction
+
+  $elapsed=[int]$cycleSw.ElapsedMilliseconds
+  $rest=$CycleLengthMs-$elapsed
+  if($rest-gt0){Start-Sleep -Milliseconds $rest}
+  $cycleSw.Stop()
+
+  $net=Get-NetworkState $miner.Id
+  $api=if(($loopSamples%10)-eq0){Get-LolApi}else{$null}
+  $hashObs=Get-LolHashrateObservation $api
+
+  $row=[ordered]@{
+    utc=(Get-Date).ToUniversalTime().ToString('o')
+    release=$Release
+    session_id=$sessionId
+    mode=$Mode
+    normalized_duty_target=$Target
+    cycle_ms=$CycleLengthMs
+    scheduled_active_ms=[int]$window.schedule.active_ms
+    actual_awake_ms=[Math]::Round($awakeElapsed,3)
+    actual_cycle_ms=[Math]::Round($cycleSw.Elapsed.TotalMilliseconds,3)
+    actual_duty_fraction=[Math]::Round($actualDuty,4)
+    controller_resume_result=[int]$window.resume_result
+    controller_suspend_result=[int]$window.suspend_result
+    off_gpu=$offGpu
+    active_gpu=$null
+    active_probe_strategy='DISABLED_INBAND_USE_INDEPENDENT_SAMPLER'
+    foreground_gpu=$fg
+    vram_free_mb=$freeMb
+    heartbeat_ms=[Math]::Round($heartbeat,3)
+    network=$net
+    api=$api
+    hashrate_mhs=$hashObs.mhs
+    hashrate_source=$hashObs.source
+    hashrate_raw=$hashObs.raw
+    miner_alive=(-not $miner.HasExited)
+    suspended_threads=$script:dutyController.SuspendedThreadCount
+  }
+  Add-Row $row
+  $script:loopSamples++
+  Write-Health $Mode $Target $offGpu $fg $net $calibrationPass $hashObs.mhs $hashObs.source
+  return [pscustomobject]$row
+}
+
+function Median([double[]]$a){if($null-eq$a-or$a.Count-eq0){return $null};$s=@($a|Sort-Object);return [double]$s[[int][Math]::Floor(($s.Count-1)/2)]}
+
+function Average([double[]]$a){
+  if($null-eq$a-or$a.Count-eq0){return $null}
+  return [double](($a|Measure-Object -Average).Average)
+}
+function Get-LineCount([string]$Path){
+  if([string]::IsNullOrWhiteSpace($Path)-or(-not(Test-Path -LiteralPath $Path))){return 0}
+  try{return @(Get-Content -LiteralPath $Path -ErrorAction Stop).Count}catch{return 0}
+}
+function Get-LinesSince([string]$Path,[int]$StartLine){
+  if([string]::IsNullOrWhiteSpace($Path)-or(-not(Test-Path -LiteralPath $Path))){return @()}
+  try{
+    $all=@(Get-Content -LiteralPath $Path -ErrorAction Stop)
+    if($StartLine-lt0){$StartLine=0}
+    if($all.Count-le$StartLine){return @()}
+    return @($all[$StartLine..($all.Count-1)])
+  }catch{return @()}
+}
+function Get-FreshLogHashratesSince([int]$StartLine){
+  $vals=[Collections.Generic.List[double]]::new()
+  foreach($line in @(Get-LinesSince ([string]$r.native_log_file) $StartLine)){
+    $v=Parse-LolHashrateLine ([string]$line)
+    if($null-ne$v){$vals.Add([double]$v)}
+  }
+  return @($vals)
+}
+function Start-GpuSampler{
+  if($null-ne$script:samplerProc -and -not$script:samplerProc.HasExited){throw 'Independent NVIDIA sampler already running'}
+  $script:samplerFile=Join-Path $state 'GPU_PHASE_SAMPLER.csv'
+  $script:samplerErr=Join-Path $state 'GPU_PHASE_SAMPLER.stderr.txt'
+  Remove-Item -LiteralPath $script:samplerFile,$script:samplerErr -Force -ErrorAction SilentlyContinue
+  $args=@(
+    '--query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,pstate',
+    '--format=csv,noheader,nounits',
+    '--loop-ms=200'
+  )
+  $script:samplerProc=Start-Process -FilePath $nvidia -ArgumentList $args -WindowStyle Hidden -RedirectStandardOutput $script:samplerFile -RedirectStandardError $script:samplerErr -PassThru
+  Start-Sleep -Milliseconds 700
+  if($script:samplerProc.HasExited){
+    $err=if(Test-Path -LiteralPath $script:samplerErr){(Get-Content -LiteralPath $script:samplerErr -Tail 30)-join' | '}else{''}
+    throw ('Independent NVIDIA sampler exited early: '+$err)
+  }
+  if((Get-LineCount $script:samplerFile)-lt1){throw 'Independent NVIDIA sampler produced no data'}
+}
+function Stop-GpuSampler{
+  if($null-ne$script:samplerProc){
+    try{if(-not$script:samplerProc.HasExited){Stop-Process -Id $script:samplerProc.Id -Force -ErrorAction SilentlyContinue}}catch{}
+    $script:samplerProc=$null
+  }
+}
+function Parse-SamplerRowsSince([int]$StartLine){
+  $vals=[Collections.Generic.List[object]]::new()
+  foreach($line in @(Get-LinesSince $script:samplerFile $StartLine)){
+    $a=([string]$line)-split ','|ForEach-Object{$_.Trim()}
+    if($a.Count-lt8){continue}
+    $u=Parse-Num $a[1];$p=Parse-Num $a[6];$t=Parse-Num $a[5];$m=Parse-Num $a[3]
+    if($null-eq$u-and$null-eq$p){continue}
+    $vals.Add([pscustomobject][ordered]@{timestamp=$a[0];util_pct=$u;memory_util_pct=(Parse-Num $a[2]);memory_used_mb=$m;memory_total_mb=(Parse-Num $a[4]);temp_c=$t;power_w=$p;pstate=$a[7]})
+  }
+  return @($vals)
+}
+function Get-ApiEtchashSnapshot{
+  $api=Get-LolApi
+  if(-not$api.ok){return $null}
+  $mhs=Convert-LolApiHashrateMhs $api
+  if($null-eq$mhs){return $null}
+  return [pscustomobject][ordered]@{mhs=[double]$mhs;source='API_TOTAL_PERFORMANCE';raw=$api.data}
+}
+function Measure-DutyPhase([double]$DutyFraction,[int]$SettleSeconds=8,[int]$MeasureSeconds=20){
+  $stageName=('GPU_CALIBRATION_'+[int]($DutyFraction*100))
+  $decision=('Measure actual scheduler timing, independent NVIDIA telemetry, fresh lolMiner hashrate and pool continuity at duty '+$DutyFraction)
+  Start-LearningStage $stageName $decision
+  $script:lastLearningEvidence=@{target_duty=$DutyFraction}
+  $settleCycles=[Math]::Max(1,[int][Math]::Ceiling($SettleSeconds/($cycleMs/1000.0)))
+  for($i=0;$i-lt$settleCycles;$i++){$null=Run-DutyCycle $DutyFraction 'CALIBRATION_SETTLE' $cycleMs $false}
+  $sampleStart=Get-LineCount $script:samplerFile;$logStart=Get-LineCount ([string]$r.native_log_file);$cycles=[Collections.Generic.List[object]]::new();$measureStart=(Get-Date).ToUniversalTime();$measureEnd=(Get-Date).AddSeconds($MeasureSeconds)
+  while((Get-Date)-lt$measureEnd){$cycles.Add((Run-DutyCycle $DutyFraction 'CALIBRATION_MEASURE' $cycleMs $false))}
+  Start-Sleep -Milliseconds 450
+  $sampler=@(Parse-SamplerRowsSince $sampleStart);$freshLog=@(Get-FreshLogHashratesSince $logStart);$apiSnap=Get-ApiEtchashSnapshot;$hashVals=[Collections.Generic.List[double]]::new();foreach($v in$freshLog){$hashVals.Add([double]$v)};if($null-ne$apiSnap){$hashVals.Add([double]$apiSnap.mhs)}
+  $util=@($sampler|Where-Object{$null-ne$_.util_pct}|ForEach-Object{[double]$_.util_pct});$power=@($sampler|Where-Object{$null-ne$_.power_w}|ForEach-Object{[double]$_.power_w});$temps=@($sampler|Where-Object{$null-ne$_.temp_c}|ForEach-Object{[double]$_.temp_c});$duties=@($cycles|ForEach-Object{[double]$_.actual_duty_fraction});$awake=@($cycles|ForEach-Object{[double]$_.actual_awake_ms});$poolFraction=if($cycles.Count-gt0){(@($cycles|Where-Object{Test-Pool20128 $_.network}).Count/[double]$cycles.Count)}else{0}
+  $phase=[pscustomobject][ordered]@{
+    target_duty=[double]$DutyFraction;measure_started_utc=$measureStart.ToString('o');measure_completed_utc=(Get-Date).ToUniversalTime().ToString('o');cycle_count=$cycles.Count;sampler_samples=$sampler.Count;actual_duty_mean=(Average $duties);actual_duty_median=(Median $duties);actual_awake_ms_mean=(Average $awake);sampler_util_mean_pct=(Average $util);sampler_util_median_pct=(Median $util);sampler_power_mean_w=(Average $power);sampler_power_median_w=(Median $power);sampler_temp_max_c=if($temps.Count-gt0){($temps|Measure-Object -Maximum).Maximum}else{$null};fresh_log_hash_samples=$freshLog.Count;fresh_log_hash_median_mhs=(Median $freshLog);api_hashrate_mhs=if($null-ne$apiSnap){[double]$apiSnap.mhs}else{$null};fresh_hashrate_mhs=if($hashVals.Count-gt0){(Median @($hashVals))}else{$null};pool_fraction=[Math]::Round($poolFraction,4);min_suspended_threads=if($cycles.Count-gt0){($cycles|Measure-Object suspended_threads -Minimum).Minimum}else{$null};max_suspended_threads=if($cycles.Count-gt0){($cycles|Measure-Object suspended_threads -Maximum).Maximum}else{$null}
+  }
+  $script:lastLearningEvidence=@{target_duty=[double]$phase.target_duty;cycle_count=[int]$phase.cycle_count;sampler_samples=[int]$phase.sampler_samples;actual_duty_mean=$phase.actual_duty_mean;sampler_util_mean_pct=$phase.sampler_util_mean_pct;sampler_power_mean_w=$phase.sampler_power_mean_w;fresh_log_hash_samples=[int]$phase.fresh_log_hash_samples;api_hashrate_mhs=$phase.api_hashrate_mhs;fresh_hashrate_mhs=$phase.fresh_hashrate_mhs;pool_fraction=[double]$phase.pool_fraction;min_suspended_threads=$phase.min_suspended_threads}
+  Pass-LearningStage $stageName $decision 'PHASE_MEASURED' 'Duty phase completed; phase-local facts persisted.' $script:lastLearningEvidence
+  return $phase
+}
+
+try{
+  Start-LearningStage 'GPU_BOOTSTRAP' 'Start lolMiner unthrottled until DAG/pool/API/hash are productive; basic mining itself is already known-good.'
+  $miner=Start-Miner
+  Start-Sleep -Milliseconds 120
+  $boot=Run-ProductiveBootstrap $miner 75
+  $script:lastLearningEvidence=@{status=$boot.status;last_hashrate_mhs=$boot.last_hashrate_mhs;hashrate_source=$boot.last_hashrate_source;pool_established=$boot.ever_pool_established;api_ready=$boot.ever_api_ready;max_power_w=$boot.max_power_w;max_memory_used_mb=$boot.max_memory_used_mb;max_temp_c=$boot.max_temp_c}
+  Pass-LearningStage 'GPU_BOOTSTRAP' 'Start lolMiner unthrottled until DAG/pool/API/hash are productive; basic mining itself is already known-good.' 'PASS_PRODUCTIVE_BOOTSTRAP' 'Productive bootstrap reached; this re-establishes prerequisite state only.' $script:lastLearningEvidence
+
+  Start-LearningStage 'GPU_DUTY_ATTACH' 'Attach explicit script-scoped thread controller only after productive bootstrap.'
+  $attached=Attach-DutyController $miner
+  if($attached-le0){throw 'Duty controller attach produced zero suspended threads'}
+  $script:lastLearningEvidence=@{suspended_threads=$attached;controller_type='MsThreadDutyController'}
+  Pass-LearningStage 'GPU_DUTY_ATTACH' 'Attach explicit script-scoped thread controller only after productive bootstrap.' 'CONTROLLER_ATTACHED' 'Thread controller attached after bootstrap and produced suspended threads.' $script:lastLearningEvidence
+
+  Start-LearningStage 'GPU_PHASE_SAMPLER' 'Start independent NVIDIA sampler outside duty windows.'
+  Start-GpuSampler
+  $script:lastLearningEvidence=@{sampler_pid=$script:samplerProc.Id;sampler_file=$script:samplerFile;sample_lines=(Get-LineCount $script:samplerFile)}
+  Pass-LearningStage 'GPU_PHASE_SAMPLER' 'Start independent NVIDIA sampler outside duty windows.' 'SAMPLER_ACTIVE' 'Independent sampler is running before phase measurement.' $script:lastLearningEvidence
+
+  Start-LearningStage 'GPU_CONTROLLED_WARMUP_40' 'Require real 40 percent scheduler duty plus pool continuity and fresh phase-local hash before full calibration.'
+  $warmLog=Get-LineCount ([string]$r.native_log_file);$warmSampler=Get-LineCount $script:samplerFile;$warmCycles=[Collections.Generic.List[object]]::new();$warmEnd=(Get-Date).AddSeconds(20);while((Get-Date)-lt$warmEnd){$warmCycles.Add((Run-DutyCycle 0.40 'CONTROLLED_WARMUP_40' 1000 $false))};Start-Sleep -Milliseconds 450
+  $warmSamples=@(Parse-SamplerRowsSince $warmSampler);$warmHash=@(Get-FreshLogHashratesSince $warmLog);$warmApi=Get-ApiEtchashSnapshot;$warmHashVals=[Collections.Generic.List[double]]::new();foreach($v in$warmHash){$warmHashVals.Add([double]$v)};if($null-ne$warmApi){$warmHashVals.Add([double]$warmApi.mhs)};$warmDuties=@($warmCycles|ForEach-Object{[double]$_.actual_duty_fraction});$warmDuty=Average $warmDuties;$warmPool=if($warmCycles.Count-gt0){(@($warmCycles|Where-Object{Test-Pool20128 $_.network}).Count/[double]$warmCycles.Count)}else{0};$warmResult=[ordered]@{schema_version='2.0';release=$Release;status='CONTROLLED_40_WARMUP_EVIDENCE';cycles=$warmCycles.Count;sampler_samples=$warmSamples.Count;actual_duty_mean=$warmDuty;pool_fraction=$warmPool;fresh_log_hash_samples=$warmHash.Count;api_hashrate_mhs=if($null-ne$warmApi){[double]$warmApi.mhs}else{$null};fresh_hashrate_mhs=if($warmHashVals.Count-gt0){(Median @($warmHashVals))}else{$null};sampler_util_mean_pct=(Average @($warmSamples|Where-Object{$null-ne$_.util_pct}|ForEach-Object{[double]$_.util_pct}));sampler_power_mean_w=(Average @($warmSamples|Where-Object{$null-ne$_.power_w}|ForEach-Object{[double]$_.power_w}));min_suspended_threads=if($warmCycles.Count-gt0){($warmCycles|Measure-Object suspended_threads -Minimum).Minimum}else{$null}}
+  $warmResult|ConvertTo-Json -Depth 25|Set-Content -LiteralPath (Join-Path $state 'WARMUP_RESULT.json') -Encoding utf8
+  $script:lastLearningEvidence=@{actual_duty_mean=$warmDuty;pool_fraction=$warmPool;fresh_hash_count=$warmHashVals.Count;fresh_hashrate_mhs=$warmResult.fresh_hashrate_mhs;sampler_samples=$warmSamples.Count;sampler_util_mean_pct=$warmResult.sampler_util_mean_pct;sampler_power_mean_w=$warmResult.sampler_power_mean_w;min_suspended_threads=$warmResult.min_suspended_threads}
+  if($warmSamples.Count-lt20-or$null-eq$warmDuty-or[double]$warmDuty-lt0.25-or[double]$warmDuty-gt0.55-or$warmPool-lt0.80-or$warmHashVals.Count-lt1){throw ('Controlled 40 warmup evidence failed: sampler='+$warmSamples.Count+' poolFraction='+$warmPool+' freshHashCount='+$warmHashVals.Count+' actualDuty='+$warmDuty)}
+  Pass-LearningStage 'GPU_CONTROLLED_WARMUP_40' 'Require real 40 percent scheduler duty plus pool continuity and fresh phase-local hash before full calibration.' 'CONTROLLED_40_PASS' '40 percent controlled warmup is scheduler-real, pool-connected and fresh-hash productive.' $script:lastLearningEvidence
+
+  $p10=Measure-DutyPhase 0.10 8 20
+  $p25=Measure-DutyPhase 0.25 8 20
+  $p40=Measure-DutyPhase 0.40 8 20
+  Start-LearningStage 'GPU_CALIBRATION_ACCEPTANCE' 'Accept or reject thread-duty only from fresh phase-local 10/25/40 evidence.'
+  $phaseResults=@($p10,$p25,$p40)
+  $productive=@($phaseResults|Where-Object{$null-ne$_.fresh_hashrate_mhs -and [double]$_.fresh_hashrate_mhs-gt0 -and [double]$_.pool_fraction-ge0.80})
+  $productive40=($null-ne$p40.fresh_hashrate_mhs -and [double]$p40.fresh_hashrate_mhs-gt0 -and [double]$p40.pool_fraction-ge0.80)
+  $lowerProductive=@($productive|Where-Object{[double]$_.target_duty-lt0.40})
+  $timingOk=$true
+  foreach($p in $phaseResults){
+    if($null-eq$p.actual_duty_mean -or [Math]::Abs([double]$p.actual_duty_mean-[double]$p.target_duty)-gt0.12){$timingOk=$false}
+  }
+  $u10=$p10.sampler_util_mean_pct;$u40=$p40.sampler_util_mean_pct;$w10=$p10.sampler_power_mean_w;$w40=$p40.sampler_power_mean_w;$controlEffect=$false
+  if($null-ne$u10-and$null-ne$u40-and([double]$u40-[double]$u10)-ge8){$controlEffect=$true}
+  if($null-ne$w10-and$null-ne$w40-and([double]$w40-[double]$w10)-ge6){$controlEffect=$true}
+  $poolOk=(@($phaseResults|Where-Object{[double]$_.pool_fraction-ge0.80}).Count-eq3)
+  $threadControl=(@($phaseResults|Where-Object{$null-ne$_.min_suspended_threads-and[int]$_.min_suspended_threads-gt0}).Count-eq3)
+  $floor=$null
+  foreach($candidate in @($p10,$p25,$p40)){
+    if($null-ne$candidate.fresh_hashrate_mhs-and[double]$candidate.fresh_hashrate_mhs-gt0-and[double]$candidate.pool_fraction-ge0.80){$floor=[double]$candidate.target_duty;break}
+  }
+  $cal=[ordered]@{
+    schema_version='2.0';release=$Release;status=if($productive40-and$lowerProductive.Count-gt0-and$timingOk-and$controlEffect-and$poolOk-and$threadControl){'PASS'}else{'FAIL'};measurement_architecture='independent_nvidia_sampler_plus_phase_local_fresh_lolminer_hashrate_plus_measured_scheduler_duty';phases=@($phaseResults);productive_at_40=$productive40;productive_lower_levels=@($lowerProductive|ForEach-Object{$_.target_duty});timing_matches_commanded_duty=$timingOk;measured_control_effect=$controlEffect;pool_connection_all_phases=$poolOk;thread_suspend_control=$threadControl;minimum_stable_productive_duty=$floor;decision='Is process suspend/resume a usable smooth background GPU actuator on this GTX1060?'
+  }
+  $cal|ConvertTo-Json -Depth 30|Set-Content -LiteralPath (Join-Path $state 'CALIBRATION_RESULT.json') -Encoding utf8
+  $script:lastLearningEvidence=@{status=$cal.status;productive_at_40=$productive40;productive_lower_levels=@($cal.productive_lower_levels);timing_matches_commanded_duty=$timingOk;measured_control_effect=$controlEffect;pool_connection_all_phases=$poolOk;thread_suspend_control=$threadControl;minimum_stable_productive_duty=$floor;phase10=$p10;phase25=$p25;phase40=$p40}
+  if($cal.status-ne'PASS'){throw ('GPU independent-sampler calibration did not prove a usable productive control surface; result='+($cal|ConvertTo-Json -Compress -Depth 20))}
+  $script:calibration=$cal;$script:calibrationPass=$true;$script:currentDuty=$maxDuty;$script:recoverClear=0
+  Pass-LearningStage 'GPU_CALIBRATION_ACCEPTANCE' 'Accept or reject thread-duty only from fresh phase-local 10/25/40 evidence.' 'CONTROL_SURFACE_PASS' '10/25/40 control surface accepted from fresh productive and measured evidence.' $script:lastLearningEvidence
+  Write-LearningState 'GPU_LIVE' 'ENTER' 'CALIBRATED_LIVE_PROMOTION' 'GPU lane entered live governor only after control-surface PASS.' @{live_floor=$floor;max_duty=$maxDuty;calibration_status=$cal.status}
+
+  while($true){
+    if(Test-Path -LiteralPath $stopRequest){break}
+    if($null-eq$miner-or$miner.HasExited){throw 'lolMiner exited during live GPU governor'}
+    $fg=Get-ForegroundEnginePct $miner.Id
+    $g=Get-NvidiaRow
+    $hard=$false;$reason=$null
+    if(-not$g.ok){$hard=$true;$reason='NVIDIA_TELEMETRY_FAIL'}
+    elseif($null-ne$g.temp_c-and[double]$g.temp_c-ge75){$hard=$true;$reason='THERMAL'}
+    elseif(($null-ne$g.memory_total_mb)-and($null-ne$g.memory_used_mb)-and([double]$g.memory_total_mb-[double]$g.memory_used_mb)-lt512){$hard=$true;$reason='VRAM'}
+    elseif((Get-HeartbeatMs)-ge1500){$hard=$true;$reason='RESPONSIVENESS'}
+    if($hard){$script:currentDuty=0.0;$script:recoverClear=0}
+    elseif(-not$fg.ok){$script:currentDuty=0.0;$script:recoverClear=0}
+    else{
+      $pressure=[double]$fg.util_pct
+      $desired=[Math]::Max(0.0,[Math]::Min($maxDuty,$maxDuty*(1.0-$pressure/100.0)))
+      if($desired-lt$script:currentDuty){$script:currentDuty=$desired;$script:recoverClear=0}else{$script:recoverClear++;if($script:recoverClear-ge6){$script:currentDuty=[Math]::Min($desired,$script:currentDuty+0.05);$script:recoverClear=0}}
+      if($script:currentDuty-gt0-and$null-ne$floor-and$script:currentDuty-lt[double]$floor){$script:currentDuty=0.0}
+    }
+    if($script:currentDuty-le0){$null=$script:dutyController.Suspend();$net=Get-NetworkState $miner.Id;$hashObs=Get-LolHashrateObservation $null;$row=[ordered]@{utc=(Get-Date).ToUniversalTime().ToString('o');release=$Release;session_id=$sessionId;mode='LIVE_PAUSED_BELOW_CALIBRATED_FLOOR_OR_SAFETY';normalized_duty_target=0.0;actual_awake_ms=0.0;actual_duty_fraction=0.0;gpu=$g;foreground_gpu=$fg;network=$net;hashrate_mhs=$hashObs.mhs;hashrate_source=$hashObs.source;miner_alive=(-not$miner.HasExited);suspended_threads=$script:dutyController.SuspendedThreadCount};Add-Row $row;$script:loopSamples++;Write-Health 'LIVE_PAUSED_BELOW_CALIBRATED_FLOOR_OR_SAFETY' 0.0 $g $fg $net $true $hashObs.mhs $hashObs.source;Start-Sleep -Milliseconds 1000}
+    else{[void](Run-DutyCycle $script:currentDuty 'LIVE_CONTINUOUS_GPU_GOVERNOR' 1000 $false)}
+  }
+}finally{
+  Write-LearningState 'GPU_RUNTIME_TERMINATION' 'ENTER' 'SUPERVISOR_EXITING' 'GPU supervisor is leaving its runtime loop; cleanup follows.' @{loop_samples=$script:loopSamples;calibration_pass=$script:calibrationPass}
+  try{Stop-GpuSampler}catch{};try{Stop-Miner}catch{};try{Close-Segment 'SUPERVISOR_STOP'}catch{};Remove-Item -LiteralPath $supPid -Force -ErrorAction SilentlyContinue
+}
+'@
+
+$script:StopPayload=@'
+param([string]$Root='D:\MiningSniper')
+Set-Content -LiteralPath (Join-Path $Root 'PROTECTED_STATE\Beta\GPU_LANE_R065_RC16\STOP_REQUESTED_GPU_R065_RC16') -Value ((Get-Date).ToUniversalTime().ToString('o')) -Encoding ascii
+Write-Host 'GPU R065 RC16 stop requested. CPU R063 RC6 is not touched.'
+'@
+$script:StatusPayload=@'
+param([string]$Root='D:\MiningSniper')
+$s=Join-Path $Root 'PROTECTED_STATE\Beta\GPU_LANE_R065_RC16';$h=Join-Path $s 'RUNTIME_HEALTH.json';if(Test-Path -LiteralPath $h){Get-Content -Raw -LiteralPath $h}else{Write-Host 'GPU R065 RC16 health file missing'}
+'@
+$script:ExportPayload=@'
+param([string]$Root='D:\MiningSniper',[int]$Hours=24)
+$ErrorActionPreference='Stop';$tele=Join-Path $Root 'TELEMETRY\Beta\GPU_LANE_R065_RC16';if(-not(Test-Path -LiteralPath $tele)){throw 'GPU R065 RC16 telemetry root missing'}
+$out=Join-Path $Root 'GENERATED\GPU_LANE_R065_RC16\EXPORTS';New-Item -ItemType Directory -Force -Path $out|Out-Null;$cut=(Get-Date).ToUniversalTime().AddHours(-$Hours);$tmp=Join-Path $out ('tmp_'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Force -Path $tmp|Out-Null
+foreach($f in Get-ChildItem -LiteralPath $tele -Recurse -File){if($f.Name-notlike'*.open' -and $f.Name-notlike'*.tmp' -and $f.LastWriteTimeUtc-ge$cut){$rel=$f.FullName.Substring($tele.Length).TrimStart('\');$dst=Join-Path $tmp $rel;New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent)|Out-Null;Copy-Item -LiteralPath $f.FullName -Destination $dst -Force}}
+$snap=Join-Path $tmp 'ACTIVE_SNAPSHOT';New-Item -ItemType Directory -Force -Path $snap|Out-Null;$snapCount=0
+foreach($f in Get-ChildItem -LiteralPath (Join-Path $tele 'RAW') -Recurse -Filter '*.jsonl.open' -File -ErrorAction SilentlyContinue){$dst=Join-Path $snap ($f.BaseName+'.snapshot.jsonl');$src=[IO.File]::Open($f.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite);try{$out=[IO.File]::Create($dst);try{$src.CopyTo($out)}finally{$out.Dispose()}}finally{$src.Dispose()};$snapCount++}
+$first=$null;$last=$null
+foreach($f in @(Get-ChildItem -LiteralPath $tmp -Recurse -File|Where-Object{$_.Name-like'*.jsonl'})){foreach($line in Get-Content -LiteralPath $f.FullName -ErrorAction SilentlyContinue){try{$o=$line|ConvertFrom-Json;
