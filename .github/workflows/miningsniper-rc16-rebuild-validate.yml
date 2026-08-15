@@ -22,7 +22,7 @@ jobs:
       - name: Rebuild and validate exact candidate
         shell: pwsh
         run: |
-          ./ci/miningsniper/rebuild_validate_rc16.ps1 -PwshPath /tmp/pwsh/pwsh
+          ./ci/miningsniper/fixup_rebuild_validator.ps1 -PwshPath /tmp/pwsh/pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: miningsniper-rc16-rebuilt
