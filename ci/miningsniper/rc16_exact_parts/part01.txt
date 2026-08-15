@@ -1,0 +1,393 @@
+IL -Decision $Decision -ReasonCode 'EXCEPTION' `
+            -ReasonText $ex.Exception.Message -Evidence $evidence | Out-Null
+        throw
+    }
+}
+
+function Complete-MiningSniperLearningRun {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$Release,
+        [Parameter(Mandatory)][ValidateSet('PASS','FAIL')][string]$Outcome,
+        [Parameter(Mandatory)][string]$ReasonCode,
+        [Parameter(Mandatory)][string]$ReasonText,
+        [hashtable]$Evidence,
+        [hashtable]$ComponentOutcomes
+    )
+    $eventType = if($Outcome -eq 'PASS'){'RUN_FINAL_PASS'}else{'RUN_FINAL_FAIL'}
+    Write-MiningSniperLearningEvent -ProjectRoot $ProjectRoot -RunId $RunId -Release $Release `
+        -EventType $eventType -Stage 'RUN' -Outcome $Outcome -Decision 'Finalize runtime attempt' `
+        -ReasonCode $ReasonCode -ReasonText $ReasonText -Evidence $Evidence `
+        -ComponentOutcomes $ComponentOutcomes
+}
+
+Export-ModuleMember -Function @(
+    'Sync-MiningSniperLearningBase',
+    'Write-MiningSniperLearningEvent',
+    'Start-MiningSniperLearningRun',
+    'Write-MiningSniperLearningStep',
+    'Invoke-MiningSniperLearningStep',
+    'Complete-MiningSniperLearningRun'
+)
+'@
+
+$script:DutyFixturePayload=@'
+param([Parameter(Mandatory)][string]$ResultPath)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+
+class FakeDutyController {
+  [int]$ResumeCount=0
+  [int]$SuspendCount=0
+  [int] Resume(){ $this.ResumeCount++; return 1 }
+  [int] Suspend(){ $this.SuspendCount++; return 1 }
+}
+
+function Get-DutySchedule([double]$DutyFraction,[int]$CycleLengthMs){
+  if($CycleLengthMs-le0){throw 'Duty cycle length must be > 0 ms'}
+  $clamped=[double]$DutyFraction
+  if([double]::IsNaN($clamped)-or[double]::IsInfinity($clamped)){throw 'Duty fraction must be finite'}
+  if($clamped-lt0.0){$clamped=0.0}
+  elseif($clamped-gt1.0){$clamped=1.0}
+  $activeMs=[int][Math]::Round(($clamped*[double]$CycleLengthMs),0,[MidpointRounding]::AwayFromZero)
+  if($activeMs-lt0){$activeMs=0}
+  elseif($activeMs-gt$CycleLengthMs){$activeMs=$CycleLengthMs}
+  return [pscustomobject][ordered]@{
+    requested_duty=[double]$DutyFraction
+    clamped_duty=$clamped
+    cycle_ms=$CycleLengthMs
+    active_ms=$activeMs
+  }
+}
+
+function Invoke-DutyWindow([object]$Controller,[double]$DutyFraction,[int]$CycleLengthMs){
+  $schedule=Get-DutySchedule $DutyFraction $CycleLengthMs
+  $awakeElapsed=0.0
+  $resumeResult=0
+  $suspendResult=0
+  if([int]$schedule.active_ms-gt0){
+    $resumeResult=[int]$Controller.Resume()
+    $awakeSw=[Diagnostics.Stopwatch]::StartNew()
+    Start-Sleep -Milliseconds ([int]$schedule.active_ms)
+    $awakeSw.Stop()
+    $awakeElapsed=$awakeSw.Elapsed.TotalMilliseconds
+    $suspendResult=[int]$Controller.Suspend()
+  }
+  $actualDuty=if($CycleLengthMs-gt0){$awakeElapsed/[double]$CycleLengthMs}else{0.0}
+  if($actualDuty-lt0.0){$actualDuty=0.0}
+  elseif($actualDuty-gt1.0){$actualDuty=1.0}
+  return [pscustomobject][ordered]@{
+    schedule=$schedule
+    resume_result=$resumeResult
+    suspend_result=$suspendResult
+    actual_awake_ms=$awakeElapsed
+    actual_duty_fraction=$actualDuty
+  }
+}
+
+function Get-Rc14OldActiveMs([double]$Target,[int]$CycleLengthMs){
+  return [int][Math]::Round([Math]::Max(0,[Math]::Min(1,$Target))*$CycleLengthMs)
+}
+
+$old=[ordered]@{
+  d10=(Get-Rc14OldActiveMs 0.10 2000)
+  d25=(Get-Rc14OldActiveMs 0.25 2000)
+  d40=(Get-Rc14OldActiveMs 0.40 2000)
+}
+
+if($old.d10-ne0-or$old.d25-ne0-or$old.d40-ne0){
+  throw ('RC14 overload fixture did not reproduce zero duty: '+($old|ConvertTo-Json -Compress))
+}
+
+$expected=@{'0.1'=200;'0.25'=500;'0.4'=800}
+$schedules=@{}
+$timing=@{}
+
+# Warm the exact timing path once. The first Start-Sleep invocation in a cold hosted PowerShell
+# process can include one-time runtime/JIT overhead unrelated to the duty scheduler itself.
+$warmFake=[FakeDutyController]::new()
+$null=Invoke-DutyWindow $warmFake 0.10 1000
+
+foreach($d in @(0.10,0.25,0.40)){
+  $key=[string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.##}',$d)
+  $s=Get-DutySchedule ([double]$d) 2000
+  if([int]$s.active_ms-ne[int]$expected[$key]){
+    throw ('New schedule wrong for '+$key+': '+[int]$s.active_ms)
+  }
+  $schedules[$key]=[int]$s.active_ms
+
+  $samples=@()
+  foreach($rep in 1..3){
+    $fake=[FakeDutyController]::new()
+    $w=Invoke-DutyWindow $fake ([double]$d) 1000
+    if($fake.ResumeCount-ne1-or$fake.SuspendCount-ne1){
+      throw ('Fake controller call count wrong for '+$key+' rep='+$rep)
+    }
+    if([double]$w.actual_awake_ms-le0){
+      throw ('Actual awake time was zero for '+$key+' rep='+$rep)
+    }
+    $samples += [double]$w.actual_duty_fraction
+  }
+
+  $sorted=@($samples|Sort-Object)
+  $median=[double]$sorted[1]
+  $err=[Math]::Abs($median-[double]$d)
+  if($err-gt0.10){
+    throw ('Median actual duty timing outside tolerance for '+$key+': '+$median+' samples='+($samples -join ','))
+  }
+
+  $timing[$key]=[ordered]@{
+    actual_duty_median=$median
+    actual_duty_samples=@($samples)
+    resume_count_each=1
+    suspend_count_each=1
+  }
+}
+
+$result=[ordered]@{
+  status='PASS'
+  rc14_old_active_ms=$old
+  repaired_schedule_active_ms=$schedules
+  fake_controller_timing=$timing
+  timing_method='one discarded warmup + median of 3 exact duty windows per target'
+  root_cause_status='PROVEN_BY_EXECUTABLE_FIXTURE'
+  root_cause='Mixed numeric overload in RC14 quantized fractional Target through Int32 Math.Min; explicit double clamp removes overload ambiguity.'
+}
+$result|ConvertTo-Json -Depth 20|Set-Content -LiteralPath $ResultPath -Encoding utf8
+Write-Output 'DUTY_BEHAVIOR_EXACT_SELFTEST_PASS'
+'@
+
+$script:SupervisorPayload=@'
+param(
+  [string]$Root='D:\MiningSniper',
+  [Parameter(Mandatory)][string]$LearningRunId
+)
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+
+$Release='GPU_LANE_R065_RC16'
+$LearningModule=Join-Path $Root 'LEARNING\MiningSniper.Learning.psm1'
+if(-not(Test-Path -LiteralPath $LearningModule)){throw 'Learning module missing before GPU supervisor start'}
+Import-Module -Name $LearningModule -Force -ErrorAction Stop
+$currentLearningStage=$null
+$lastLearningEvidence=@{}
+function Start-LearningStage([string]$Stage,[string]$Decision){
+  $script:currentLearningStage=$Stage
+  $script:lastLearningEvidence=@{}
+  Write-MiningSniperLearningStep -ProjectRoot $Root -RunId $LearningRunId -Release $Release -StepId $Stage -Outcome START -Decision $Decision -ReasonCode 'STEP_ENTER' -ReasonText 'Entering decision-critical GPU runtime stage.' | Out-Null
+}
+function Pass-LearningStage([string]$Stage,[string]$Decision,[string]$ReasonCode,[string]$ReasonText,[hashtable]$Evidence){
+  Write-MiningSniperLearningStep -ProjectRoot $Root -RunId $LearningRunId -Release $Release -StepId $Stage -Outcome PASS -Decision $Decision -ReasonCode $ReasonCode -ReasonText $ReasonText -Evidence $Evidence | Out-Null
+  $script:currentLearningStage=$null
+  $script:lastLearningEvidence=@{}
+}
+function Write-LearningState([string]$Stage,[string]$Outcome,[string]$ReasonCode,[string]$ReasonText,[hashtable]$Evidence){
+  Write-MiningSniperLearningEvent -ProjectRoot $Root -RunId $LearningRunId -Release $Release -EventType 'STATE_TRANSITION' -Stage $Stage -Outcome $Outcome -Decision 'Record GPU runtime state transition' -ReasonCode $ReasonCode -ReasonText $ReasonText -Evidence $Evidence | Out-Null
+}
+$state=Join-Path $Root 'PROTECTED_STATE\Beta\GPU_LANE_R065_RC16'
+$teleRoot=Join-Path $Root 'TELEMETRY\Beta\GPU_LANE_R065_RC16'
+$rawRoot=Join-Path $teleRoot 'RAW'
+$reportRoot=Join-Path $teleRoot 'REPORTS'
+$manifestRoot=Join-Path $teleRoot 'MANIFESTS'
+$healthFile=Join-Path $state 'RUNTIME_HEALTH.json'
+$pidFile=Join-Path $state 'lolminer.pid'
+$supPid=Join-Path $state 'supervisor.pid'
+$stopRequest=Join-Path $state 'STOP_REQUESTED_GPU_R065_RC16'
+$manifestFile=Join-Path $manifestRoot 'HOURLY_MANIFEST.jsonl'
+$latestClosed=Join-Path $teleRoot 'LATEST_CLOSED_REPORT.json'
+foreach($d in @($state,$teleRoot,$rawRoot,$reportRoot,$manifestRoot)){New-Item -ItemType Directory -Force -Path $d|Out-Null}
+Set-Content -LiteralPath $supPid -Value $PID -Encoding ascii
+Remove-Item -LiteralPath $stopRequest -Force -ErrorAction SilentlyContinue
+
+$relPath=Join-Path $state 'CURRENT_RELEASE.json'
+if(-not(Test-Path -LiteralPath $relPath)){throw 'GPU R065 RC16 release pointer missing'}
+$r=Get-Content -Raw -LiteralPath $relPath|ConvertFrom-Json
+$lol=[string]$r.lolminer_exe
+$apiPort=[int]$r.api_port
+$maxDuty=[double]$r.max_normalized_duty
+$minDuty=0.05
+$cycleMs=1000
+$currentDuty=0.10
+$recoverClear=0
+$telemetryFailures=0
+$loopSamples=0
+$sessionId=((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))+'_'+$PID
+$currentOpen=$null
+$currentHour=$null
+$miner=$null
+$dutyController=$null
+$lastApi=$null
+$lastLogHashrate=$null
+$lastAccepted=$null
+$calibration=$null
+$calibrationPass=$false
+$samplerProc=$null
+$samplerFile=$null
+$samplerErr=$null
+
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+public sealed class MsThreadDutyController : IDisposable {
+    const UInt32 THREAD_SUSPEND_RESUME = 0x0002;
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenThread(UInt32 access, bool inherit, UInt32 tid);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern UInt32 SuspendThread(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern UInt32 ResumeThread(IntPtr h);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    readonly int pid;
+    readonly HashSet<int> suspended = new HashSet<int>();
+    public MsThreadDutyController(int processId) { pid = processId; }
+    public int Suspend() {
+        int added=0;
+        using(var p=Process.GetProcessById(pid)) {
+            foreach(ProcessThread t in p.Threads) {
+                if(suspended.Contains(t.Id)) continue;
+                IntPtr h=OpenThread(THREAD_SUSPEND_RESUME,false,(UInt32)t.Id);
+                if(h==IntPtr.Zero) continue;
+                try {
+                    UInt32 prev=SuspendThread(h);
+                    if(prev!=0xffffffff) { suspended.Add(t.Id); added++; }
+                } finally { CloseHandle(h); }
+            }
+        }
+        return added;
+    }
+    public int Resume() {
+        int n=0;
+        foreach(int tid in new List<int>(suspended)) {
+            IntPtr h=OpenThread(THREAD_SUSPEND_RESUME,false,(UInt32)tid);
+            if(h!=IntPtr.Zero) {
+                try { if(ResumeThread(h)!=0xffffffff) n++; } finally { CloseHandle(h); }
+            }
+            suspended.Remove(tid);
+        }
+        return n;
+    }
+    public int SuspendedThreadCount { get { return suspended.Count; } }
+    public void Dispose() { try { Resume(); } catch {} }
+}
+"@ -Language CSharp
+
+function Parse-Num([string]$s){
+  if([string]::IsNullOrWhiteSpace($s)){return $null}
+  $x=0.0
+  if([double]::TryParse($s.Trim(),[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$x)){return $x}
+  return $null
+}
+function Find-NvidiaSmi{
+  $c=Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+  if($null-ne$c){return $c.Source}
+  foreach($p in @('C:\Windows\System32\nvidia-smi.exe','C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe')){if(Test-Path -LiteralPath $p){return $p}}
+  return $null
+}
+$nvidia=Find-NvidiaSmi
+if($null-eq$nvidia){throw 'nvidia-smi.exe not found'}
+function Get-NvidiaRow{
+  try{
+    $line=& $nvidia '--query-gpu=index,name,driver_version,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,pstate' '--format=csv,noheader,nounits' 2>&1|Select-Object -First 1
+    $exitVar=Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
+    $nativeExit=if($null-eq$exitVar){0}else{[int]$exitVar}
+    if($nativeExit-ne0 -or [string]::IsNullOrWhiteSpace([string]$line)){throw ('nvidia-smi exit='+$nativeExit+' output='+[string]$line)}
+    $a=([string]$line)-split ','|ForEach-Object{$_.Trim()}
+    if($a.Count-lt10){throw ('nvidia-smi field count '+$a.Count+' < 10: '+[string]$line)}
+    return [pscustomobject][ordered]@{
+      ok=$true;index=[int]$a[0];name=$a[1];driver=$a[2];util_pct=(Parse-Num $a[3]);mem_util_pct=(Parse-Num $a[4]);
+      memory_used_mb=(Parse-Num $a[5]);memory_total_mb=(Parse-Num $a[6]);temp_c=(Parse-Num $a[7]);power_w=(Parse-Num $a[8]);pstate=$a[9];raw=[string]$line
+    }
+  }catch{return [pscustomobject][ordered]@{
+    ok=$false;index=$null;name=$null;driver=$null;util_pct=$null;mem_util_pct=$null;
+    memory_used_mb=$null;memory_total_mb=$null;temp_c=$null;power_w=$null;pstate=$null;
+    raw=$null;error=$_.Exception.ToString()
+  }}
+}
+function Get-ForegroundEnginePct([int]$MinerPid){
+  try{
+    $rows=@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop)
+    $sum=0.0;$seen=0
+    foreach($x in $rows){
+      $name=[string]$x.Name
+      if($name -match ('(?i)pid_'+$MinerPid+'_')){continue}
+      $v=[double]$x.UtilizationPercentage
+      if($v-gt0){$sum+=$v;$seen++}
+    }
+    return [pscustomobject][ordered]@{ok=$true;util_pct=[Math]::Min(100.0,$sum);active_instances=$seen;error=$null}
+  }catch{return [pscustomobject][ordered]@{ok=$false;util_pct=$null;active_instances=0;error=$_.Exception.Message}}
+}
+function Get-HeartbeatMs{
+  $sw=[Diagnostics.Stopwatch]::StartNew();try{$null=& cmd.exe /d /c 'exit 0'}catch{};$sw.Stop();return $sw.Elapsed.TotalMilliseconds
+}
+function Get-LolApi{
+  foreach($path in @('/summary','/')){
+    try{
+      $o=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$apiPort+$path) -TimeoutSec 2 -ErrorAction Stop
+      return [pscustomobject][ordered]@{ok=$true;path=$path;data=$o;error=$null}
+    }catch{}
+  }
+  return [pscustomobject][ordered]@{ok=$false;path=$null;data=$null;error='lolMiner API unavailable'}
+}
+function Convert-LolApiHashrateMhs([object]$Api){
+  if($null-eq$Api -or -not$Api.ok -or $null-eq$Api.data){return $null}
+  try{
+    foreach($alg in @($Api.data.Algorithms)){
+      if($null-eq$alg){continue}
+      $name=[string]$alg.Algorithm
+      if($name-notmatch'(?i)^Etchash$'){continue}
+      $perfProp=$alg.PSObject.Properties['Total_Performance']
+      $unitProp=$alg.PSObject.Properties['Performance_Unit']
+      if($null-eq$perfProp -or $null-eq$unitProp){continue}
+      $v=[double]$perfProp.Value
+      if($v-le0){continue}
+      $unit=([string]$unitProp.Value).Trim().ToLowerInvariant()
+      switch -Regex($unit){
+        '^mh/s$' {return $v}
+        '^mhs$'  {return $v}
+        '^kh/s$' {return ($v/1000.0)}
+        '^h/s$'  {return ($v/1000000.0)}
+        '^gh/s$' {return ($v*1000.0)}
+      }
+    }
+  }catch{}
+  return $null
+}
+function Parse-LolHashrateLine([string]$Line){
+  if([string]::IsNullOrWhiteSpace($Line)){return $null}
+  # Exact lolMiner 1.98a fixture: "Average speed (5s): 17.89 Mh/s"
+  $m=[regex]::Match($Line,'(?i)\bAverage\s+speed(?:\s*\([^)]*\))?\s*:\s*([0-9]+(?:[\.,][0-9]+)?)\s*(Mh/s|Mhs)\b')
+  if($m.Success){
+    return [double]::Parse($m.Groups[1].Value.Replace(',','.'),[Globalization.CultureInfo]::InvariantCulture)
+  }
+  return $null
+}
+function Get-LolHashrateObservation([object]$Api=$null){
+  $apiMhs=Convert-LolApiHashrateMhs $Api
+  if($null-ne$apiMhs -and [double]$apiMhs-gt0){
+    return [pscustomobject][ordered]@{mhs=[double]$apiMhs;source='API_TOTAL_PERFORMANCE';raw=$null}
+  }
+  foreach($log in @([string]$r.native_log_file,[string]$r.stdout_file)){
+    if([string]::IsNullOrWhiteSpace($log)-or(-not(Test-Path -LiteralPath $log))){continue}
+    try{
+      $lines=Get-Content -LiteralPath $log -Tail 220 -ErrorAction Stop
+      for($i=$lines.Count-1;$i-ge0;$i--){
+        $mhs=Parse-LolHashrateLine ([string]$lines[$i])
+        if($null-ne$mhs -and [double]$mhs-gt0){
+          return [pscustomobject][ordered]@{mhs=[double]$mhs;source='NATIVE_LOG_AVERAGE_SPEED';raw=[string]$lines[$i]}
+        }
+      }
+    }catch{}
+  }
+  return [pscustomobject][ordered]@{mhs=$null;source='NONE';raw=$null}
+}
+function Get-NativeLogTail([int]$Count=60){
+  $p=[string]$r.native_log_file
+  if([string]::IsNullOrWhiteSpace($p)-or(-not(Test-Path -LiteralPath $p))){return $null}
+  try{return (Get-Content -LiteralPath $p -Tail $Count -ErrorAction Stop)-join"`n"}catch{return $null}
+}
+function Get-NetworkState([int]$ProcessId){
+  try{
+    $c=@(Get-
