@@ -1,0 +1,28 @@
+name: MiningSniper pinned PowerShell 7.6.3 toolchain export
+
+on:
+  push:
+    branches:
+      - miningsniper-ci-rc16-final
+    paths:
+      - '.github/workflows/miningsniper-pwsh763-toolchain-export.yml'
+
+jobs:
+  export-toolchain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify official PowerShell 7.6.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/powershell-7.6.3-linux-x64.tar.gz'
+          expected='856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7'
+          curl -L --fail --retry 3 -o powershell-7.6.3-linux-x64.tar.gz "$url"
+          echo "$expected  powershell-7.6.3-linux-x64.tar.gz" | sha256sum -c -
+
+      - name: Upload verified toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: PowerShell-7.6.3-linux-x64-sha256-verified
+          path: powershell-7.6.3-linux-x64.tar.gz
+          if-no-files-found: error
