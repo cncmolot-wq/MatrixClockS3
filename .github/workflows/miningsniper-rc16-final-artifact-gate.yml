@@ -6,6 +6,7 @@ on:
       - miningsniper-ci-rc16-final
     paths:
       - '.github/workflows/miningsniper-rc16-final-artifact-gate.yml'
+      - 'ci/miningsniper/validate_rc16_final.ps1'
 
 jobs:
   final-artifact-gate:
@@ -38,118 +39,11 @@ jobs:
           chmod +x /tmp/pwsh763/pwsh
           test "$(/tmp/pwsh763/pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')" = '7.6.3'
 
-      - name: Exact RC16 parse payload parity and executable fixtures
+      - name: Run exact external RC16 validator
         shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/validate_rc16_final.ps1 <<'PWSH'
-          param([Parameter(Mandatory)][string]$MainPath,[Parameter(Mandatory)][string]$ResultPath)
-          $ErrorActionPreference='Stop'
-          Set-StrictMode -Version Latest
-
-          $raw=Get-Content -Raw -LiteralPath $MainPath
-          $sha=(Get-FileHash -Algorithm SHA256 -LiteralPath $MainPath).Hash.ToLowerInvariant()
-          $first=($raw -split "`r?`n"|Where-Object{-not[string]::IsNullOrWhiteSpace($_)}|Select-Object -First 1).Trim()
-          if(-not$first.StartsWith('param(')){throw ('MAIN_PARAM_FIRST_FAIL: '+$first)}
-          if(-not$raw.Contains("GPU_LANE_R065_RC16")){throw 'RC16 release identity missing'}
-          if($raw.Contains("GPU_LANE_R065_RC15")){throw 'stale GPU_LANE_R065_RC15 identity remains'}
-          if($raw.Contains("PROTECTED_STATE\Beta\GPU_LANE_R065_RC15")){throw 'stale RC15 state path remains'}
-
-          $tok=$null;$err=$null
-          $ast=[Management.Automation.Language.Parser]::ParseFile($MainPath,[ref]$tok,[ref]$err)
-          if($err.Count-gt0){
-            foreach($e in $err){Write-Host ('PARSER_ERROR '+$e.ErrorId+' line='+$e.Extent.StartLineNumber+' col='+$e.Extent.StartColumnNumber+' text=['+$e.Extent.Text+'] '+$e.Message)}
-            throw ('MAIN_PARSE_FAIL count='+$err.Count)
-          }
-
-          function Get-ConstantPayload([string]$Name){
-            $a=@($ast.FindAll({param($n)$n-is[Management.Automation.Language.AssignmentStatementAst]},$true)|Where-Object{
-              $_.Left-is[Management.Automation.Language.VariableExpressionAst] -and $_.Left.VariablePath.UserPath-eq$Name
-            }|Select-Object -First 1)
-            if($a.Count-ne1){throw ('PAYLOAD_ASSIGNMENT_MISSING '+$Name)}
-            if($a[0].Right-isnot[Management.Automation.Language.StringConstantExpressionAst]){throw ('PAYLOAD_NOT_CONSTANT '+$Name)}
-            return [string]$a[0].Right.Value
-          }
-
-          $supervisor=Get-ConstantPayload 'script:SupervisorPayload'
-          $duty=Get-ConstantPayload 'script:DutyFixturePayload'
-          if([string]::IsNullOrWhiteSpace($supervisor)-or[string]::IsNullOrWhiteSpace($duty)){throw 'payload empty'}
-
-          $st=$null;$se=$null;$sa=[Management.Automation.Language.Parser]::ParseInput($supervisor,[ref]$st,[ref]$se)
-          if($se.Count-gt0){throw ('SUPERVISOR_PARSE_FAIL: '+(($se|ForEach-Object{$_.Message})-join'; '))}
-          $dt=$null;$de=$null;$da=[Management.Automation.Language.Parser]::ParseInput($duty,[ref]$dt,[ref]$de)
-          if($de.Count-gt0){throw ('DUTY_PAYLOAD_PARSE_FAIL: '+(($de|ForEach-Object{$_.Message})-join'; '))}
-          $dutyFirst=($duty -split "`r?`n"|Where-Object{-not[string]::IsNullOrWhiteSpace($_)}|Select-Object -First 1).Trim()
-          if(-not$dutyFirst.StartsWith('param(')){throw ('DUTY_PARAM_FIRST_FAIL: '+$dutyFirst)}
-
-          foreach($name in @('Get-DutySchedule','Invoke-DutyWindow')){
-            $sf=@($sa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|Where-Object{$_.Name-eq$name}|Select-Object -First 1)
-            $df=@($da.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|Where-Object{$_.Name-eq$name}|Select-Object -First 1)
-            if($sf.Count-ne1-or$df.Count-ne1){throw ('DUTY_FUNCTION_MISSING '+$name)}
-            $sn=($sf[0].Extent.Text-replace'\s+',' ').Trim();$dn=($df[0].Extent.Text-replace'\s+',' ').Trim()
-            if($sn-ne$dn){throw ('DUTY_FUNCTION_DRIFT '+$name)}
-          }
-
-          $tmp=Join-Path ([IO.Path]::GetTempPath()) ('ms_rc16_final_'+[guid]::NewGuid().ToString('N'))
-          [IO.Directory]::CreateDirectory($tmp)|Out-Null
-          try{
-            $dutyPath=Join-Path $tmp 'DUTY_BEHAVIOR_EXACT_SELFTEST.ps1';$dutyResult=Join-Path $tmp 'DUTY_RESULT.json'
-            Set-Content -LiteralPath $dutyPath -Value $duty -Encoding utf8
-            $do=@(& $dutyPath -ResultPath $dutyResult)
-            if($do-notcontains'DUTY_BEHAVIOR_EXACT_SELFTEST_PASS'){throw 'DUTY_EXEC_MARKER_MISSING'}
-            $dr=Get-Content -Raw -LiteralPath $dutyResult|ConvertFrom-Json
-            if($dr.status-ne'PASS'){throw 'DUTY_RESULT_NOT_PASS'}
-            if($dr.rc14_old_active_ms.d10-ne0-or$dr.rc14_old_active_ms.d25-ne0-or$dr.rc14_old_active_ms.d40-ne0){throw 'RC14_ZERO_REPRO_MISMATCH'}
-            if($dr.repaired_schedule_active_ms.'0.1'-ne200-or$dr.repaired_schedule_active_ms.'0.25'-ne500-or$dr.repaired_schedule_active_ms.'0.4'-ne800){throw 'REPAIRED_SCHEDULE_MISMATCH'}
-            foreach($k in @('0.1','0.25','0.4')){
-              $t=$dr.fake_controller_timing.$k
-              if($t.resume_count_each-ne1-or$t.suspend_count_each-ne1){throw ('DUTY_CONTROLLER_COUNT_MISMATCH '+$k)}
-              if([double]$t.actual_duty_median-le0){throw ('DUTY_MEDIAN_ZERO '+$k)}
-            }
-
-            $apiFn=@($sa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-eq'Convert-LolApiHashrateMhs'},$true)|Select-Object -First 1)
-            $logFn=@($sa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-eq'Parse-LolHashrateLine'},$true)|Select-Object -First 1)
-            if($apiFn.Count-ne1-or$logFn.Count-ne1){throw 'HASHRATE_FUNCTION_EXTRACTION_FAIL'}
-            $hashScript="param()`n`$ErrorActionPreference='Stop'`nSet-StrictMode -Version Latest`n"+$apiFn[0].Extent.Text+"`n"+$logFn[0].Extent.Text+@'
-
-$apiFixture=[pscustomobject]@{ok=$true;data=[pscustomobject]@{Algorithms=@([pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239})}}
-$a=Convert-LolApiHashrateMhs $apiFixture
-if($null-eq$a-or[Math]::Abs([double]$a-12.352733907856239)-gt0.000001){throw ('API_FIXTURE_FAIL '+[string]$a)}
-$l=Parse-LolHashrateLine 'Average speed (5s): 17.89 Mh/s'
-if($null-eq$l-or[Math]::Abs([double]$l-17.89)-gt0.000001){throw ('LOG_FIXTURE_FAIL '+[string]$l)}
-Write-Output 'HASHRATE_FIXTURE_PASS'
-'@
-            $hashPath=Join-Path $tmp 'HASHRATE_FIXTURE.ps1';Set-Content -LiteralPath $hashPath -Value $hashScript -Encoding utf8
-            $ho=@(& $hashPath)
-            if($ho-notcontains'HASHRATE_FIXTURE_PASS'){throw 'HASHRATE_EXEC_FAIL'}
-
-            # Explicit generated executable child inventory from the exact main artifact.
-            $childNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-            foreach($m in [regex]::Matches($raw,"'([^']+\\.ps1)'")){[void]$childNames.Add($m.Groups[1].Value)}
-            $requiredChildren=@('DUTY_BEHAVIOR_EXACT_SELFTEST.ps1','HASHRATE_DETECTOR_EXACT_SELFTEST.ps1','GPU_GOVERNOR_R065_RC16.ps1','STOP_GPU_R065_RC16.ps1','STATUS_GPU_R065_RC16.ps1','EXPORT_GPU_R065_RC16_TELEMETRY.ps1')
-            foreach($c in $requiredChildren){if(-not$childNames.Contains($c)){throw ('GENERATED_CHILD_NOT_ENUMERATED '+$c)}}
-
-            # Case-insensitive automatic/protected parameter collision scan over main + supervisor.
-            $reserved=@('pid','pshome','host','home','args','input','matches','error','this','foreach','switch','profile','pwd','null','true','false')
-            $bad=[Collections.Generic.List[string]]::new()
-            foreach($tree in @($ast,$sa)){
-              foreach($p in @($tree.FindAll({param($n)$n-is[Management.Automation.Language.ParameterAst]},$true))){
-                $n=[string]$p.Name.VariablePath.UserPath
-                if($reserved-contains$n){$bad.Add($n)}
-              }
-            }
-            if($bad.Count-gt0){throw ('PARAM_STATE_COLLISION '+(($bad|Sort-Object -Unique)-join','))}
-
-            [ordered]@{
-              status='PASS';powershell=$PSVersionTable.PSVersion.ToString();artifact_sha256=$sha;
-              main_parse='PASS';supervisor_parse='PASS';duty_param_first='PASS';duty_function_parity='PASS';
-              duty_fixture='PASS';hashrate_fixture='PASS';generated_child_inventory='PASS';parameter_collision_scan='PASS';
-              rc14_old_active_ms=$dr.rc14_old_active_ms;repaired_active_ms=$dr.repaired_schedule_active_ms;timing=$dr.fake_controller_timing
-            }|ConvertTo-Json -Depth 20|Set-Content -LiteralPath $ResultPath -Encoding utf8
-            Write-Host 'FINAL_RC16_EXACT_ARTIFACT_GATE_PASS'
-          }finally{Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue}
-          PWSH
-          /tmp/pwsh763/pwsh -NoProfile -File /tmp/validate_rc16_final.ps1 -MainPath RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1 -ResultPath FINAL_RC16_EXACT_ARTIFACT_GATE_RESULT.json
+          /tmp/pwsh763/pwsh -NoProfile -File ci/miningsniper/validate_rc16_final.ps1 -MainPath RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1 -ResultPath FINAL_RC16_EXACT_ARTIFACT_GATE_RESULT.json
           cat FINAL_RC16_EXACT_ARTIFACT_GATE_RESULT.json
 
       - name: Upload exact validated RC16 artifact and receipts
