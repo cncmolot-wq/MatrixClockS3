@@ -61,10 +61,10 @@ $n1=$patched.IndexOf($needle,[StringComparison]::Ordinal);$n2=$patched.LastIndex
 if($n1-lt0-or$n1-ne$n2){throw ('Expected one ExportPayload replacement call, first='+$n1+' last='+$n2)}
 $patched=$patched.Substring(0,$n1)+$insert+$patched.Substring($n1+$needle.Length)
 $badApi=@'
-$apiFixture=[pscustomobject]@{ok=$true;data=[pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239}}
+`$apiFixture=[pscustomobject]@{ok=`$true;data=[pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239}}
 '@
 $goodApi=@'
-$apiFixture=[pscustomobject]@{ok=$true;data=[pscustomobject]@{Algorithms=@([pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239})}}
+`$apiFixture=[pscustomobject]@{ok=`$true;data=[pscustomobject]@{Algorithms=@([pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239})}}
 '@
 $badApi=$badApi.Trim();$goodApi=$goodApi.Trim()
 $a1=$patched.IndexOf($badApi,[StringComparison]::Ordinal);$a2=$patched.LastIndexOf($badApi,[StringComparison]::Ordinal)
