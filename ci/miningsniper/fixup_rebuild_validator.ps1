@@ -19,9 +19,17 @@ $new=@'
 function Replace-PayloadAssignment([string]$Main,[string]$Name,[string]$Payload){
   $t=$null;$e=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($Main,[ref]$t,[ref]$e)
   if($e.Count-gt0){throw ('Main parse before payload replacement failed '+$Name+': '+(($e|ForEach-Object{$_.ErrorId+':'+$_.Message})-join' | '))}
-  $assign=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq ('$script:'+$Name)},$true))
-  if($assign.Count-ne1){throw ('Payload AST assignment count '+$Name+' = '+$assign.Count)}
+  $assign=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq ('$script:'+$Name)},$true)|Sort-Object {$_.Extent.StartOffset})
   $replacement='$script:'+$Name+"=@'`n"+$Payload.TrimEnd("`r","`n")+"`n'@"
+  if($Name-eq'ExportPayload'){
+    if($assign.Count-ne2){throw ('Expected exactly two forensic ExportPayload assignments, got '+$assign.Count)}
+    # Both were proven top-level in the same script block. The later assignment is effective at runtime.
+    # Replace the later one first, then delete the earlier duplicate so offset changes cannot corrupt selection.
+    $late=$assign[1].Extent;$early=$assign[0].Extent
+    $afterLate=Replace-Extent $Main $late $replacement
+    return $afterLate.Substring(0,$early.StartOffset)+$afterLate.Substring($early.EndOffset)
+  }
+  if($assign.Count-ne1){throw ('Payload AST assignment count '+$Name+' = '+$assign.Count)}
   return Replace-Extent $Main $assign[0].Extent $replacement
 }
 '@
