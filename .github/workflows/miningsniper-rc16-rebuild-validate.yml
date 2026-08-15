@@ -1,0 +1,34 @@
+name: MiningSniper RC16 deterministic rebuild validate
+on:
+  push:
+    branches: [miningsniper-rc16-recover]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned PowerShell 7.6.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L -o /tmp/pwsh.tar.gz https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/powershell-7.6.3-linux-x64.tar.gz
+          echo '856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7  /tmp/pwsh.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/pwsh && tar -xzf /tmp/pwsh.tar.gz -C /tmp/pwsh
+          chmod +x /tmp/pwsh/pwsh
+          /tmp/pwsh/pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+      - name: Rebuild and validate exact candidate
+        shell: pwsh
+        run: |
+          ./ci/miningsniper/rebuild_validate_rc16.ps1 -PwshPath /tmp/pwsh/pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: miningsniper-rc16-rebuilt
+          path: |
+            ci/miningsniper/out/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
+            ci/miningsniper/out/RC16_REBUILD_VALIDATION.json
+            ci/miningsniper/out/DUTY_RESULT.json
+            ci/miningsniper/out/HASHRATE_RESULT.json
+          if-no-files-found: error
