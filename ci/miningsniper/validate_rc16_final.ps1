@@ -21,8 +21,12 @@ function Get-ConstantPayload([string]$Name){
     $_.Left-is[Management.Automation.Language.VariableExpressionAst] -and $_.Left.VariablePath.UserPath-eq$Name
   }|Select-Object -First 1)
   if($a.Count-ne1){throw ('PAYLOAD_ASSIGNMENT_MISSING '+$Name)}
-  if($a[0].Right-isnot[Management.Automation.Language.StringConstantExpressionAst]){throw ('PAYLOAD_NOT_CONSTANT '+$Name)}
-  return [string]$a[0].Right.Value
+  $rhs=$a[0].Right
+  if($rhs-is[Management.Automation.Language.StringConstantExpressionAst]){return [string]$rhs.Value}
+  if($rhs-is[Management.Automation.Language.CommandExpressionAst] -and $rhs.Expression-is[Management.Automation.Language.StringConstantExpressionAst]){
+    return [string]$rhs.Expression.Value
+  }
+  throw ('PAYLOAD_LITERAL_SHAPE_UNSUPPORTED '+$Name+' rhs='+$rhs.GetType().FullName)
 }
 
 $supervisor=Get-ConstantPayload 'script:SupervisorPayload'
@@ -49,7 +53,6 @@ foreach($name in @('Get-DutySchedule','Invoke-DutyWindow')){
   if($sn-ne$dn){throw ('DUTY_FUNCTION_DRIFT '+$name)}
 }
 
-# Permanent custom symbol closure copied from the release's own current contract.
 $definedFnNames=@($sa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|ForEach-Object{$_.Name})
 $internalExact=@('Parse-Num','Find-NvidiaSmi','Get-NvidiaRow','Get-ForegroundEnginePct','Get-HeartbeatMs','Get-LolApi','Convert-LolApiHashrateMhs','Parse-LolHashrateLine','Get-LolHashrateObservation','Get-NativeLogTail','Get-NetworkState','Test-Pool20128','Start-Miner','Attach-DutyController','Stop-Miner','Day-Dirs','Start-Segment','Close-Segment','Add-Row','Write-Health','Run-ProductiveBootstrap','Get-DutySchedule','Invoke-DutyWindow','Run-DutyCycle','Median','Average','Get-LineCount','Get-LinesSince','Get-FreshLogHashratesSince','Start-GpuSampler','Stop-GpuSampler','Parse-SamplerRowsSince','Get-ApiEtchashSnapshot','Measure-DutyPhase','Start-LearningStage','Pass-LearningStage','Write-LearningState')
 $missing=[Collections.Generic.List[string]]::new()
@@ -86,7 +89,6 @@ try{
   $logFn=@($sa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-eq'Parse-LolHashrateLine'},$true)|Select-Object -First 1)
   if($apiFn.Count-ne1-or$logFn.Count-ne1){throw 'HASHRATE_FUNCTION_EXTRACTION_FAIL'}
   $apiFixture=[pscustomobject]@{ok=$true;data=[pscustomobject]@{Algorithms=@([pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239})}}
-  # Materialize exact functions into current scope without a second generated script.
   . ([scriptblock]::Create($apiFn[0].Extent.Text))
   . ([scriptblock]::Create($logFn[0].Extent.Text))
   $a=Convert-LolApiHashrateMhs $apiFixture
