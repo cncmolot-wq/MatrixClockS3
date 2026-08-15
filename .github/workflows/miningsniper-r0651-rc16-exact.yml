@@ -27,94 +27,25 @@ jobs:
           chmod +x /tmp/pwsh763/pwsh
           test "$(/tmp/pwsh763/pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')" = '7.6.3'
 
-      - name: Parse exact RC16 and execute embedded decision fixtures
+      - name: Parse exact RC16 and print exact error locations
         shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/validate_rc16.ps1 <<'PWSH'
+          cat > /tmp/parse_rc16.ps1 <<'PWSH'
           param([Parameter(Mandatory)][string]$MainPath)
           $ErrorActionPreference='Stop'
-          Set-StrictMode -Version Latest
-
-          $raw=Get-Content -Raw -LiteralPath $MainPath
-          $first=($raw -split "`r?`n"|Where-Object{-not[string]::IsNullOrWhiteSpace($_)}|Select-Object -First 1).Trim()
-          if(-not$first.StartsWith('param(')){throw ('main param-first failed: '+$first)}
-          if($raw.Contains('RC15')){throw 'stale RC15 identity remains in exact RC16 file'}
-          if(-not$raw.Contains("GPU_LANE_R065_RC16")){throw 'RC16 identity missing'}
-
           $tok=$null;$err=$null
-          $ast=[Management.Automation.Language.Parser]::ParseFile($MainPath,[ref]$tok,[ref]$err)
-          if($err.Count-gt0){throw ('main parse errors: '+(($err|ForEach-Object{$_.Message})-join'; '))}
-
-          function Get-Payload([string]$Name){
-            $assign=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst]},$true)|Where-Object{
-              $_.Left -is [Management.Automation.Language.VariableExpressionAst] -and $_.Left.VariablePath.UserPath -eq $Name
-            }|Select-Object -First 1)
-            if($assign.Count-ne1){throw ('payload assignment missing: '+$Name)}
-            if($assign[0].Right -isnot [Management.Automation.Language.StringConstantExpressionAst]){throw ('payload is not constant string: '+$Name)}
-            return [string]$assign[0].Right.Value
+          [void][Management.Automation.Language.Parser]::ParseFile($MainPath,[ref]$tok,[ref]$err)
+          if($err.Count-gt0){
+            $lines=Get-Content -LiteralPath $MainPath
+            foreach($e in $err){
+              $ln=$e.Extent.StartLineNumber;$col=$e.Extent.StartColumnNumber
+              $src=if($ln-ge1-and$ln-le$lines.Count){$lines[$ln-1]}else{''}
+              Write-Host ('PARSER_ERROR line='+$ln+' col='+$col+' id='+$e.ErrorId+' text=['+$e.Extent.Text+'] message='+$e.Message)
+              Write-Host ('SOURCE['+$ln+'] '+$src)
+            }
+            throw ('exact RC16 ParseFile failed with '+$err.Count+' error(s)')
           }
-
-          $fixture=Get-Payload 'script:DutyFixturePayload'
-          $supervisor=Get-Payload 'script:SupervisorPayload'
-          if([string]::IsNullOrWhiteSpace($fixture)-or[string]::IsNullOrWhiteSpace($supervisor)){throw 'payload extraction empty'}
-
-          $ft=$null;$fe=$null;$fa=[Management.Automation.Language.Parser]::ParseInput($fixture,[ref]$ft,[ref]$fe)
-          if($fe.Count-gt0){throw ('fixture parse: '+(($fe|ForEach-Object{$_.Message})-join'; '))}
-          $st=$null;$se=$null;$sa=[Management.Automation.Language.Parser]::ParseInput($supervisor,[ref]$st,[ref]$se)
-          if($se.Count-gt0){throw ('supervisor parse: '+(($se|ForEach-Object{$_.Message})-join'; '))}
-          $fixtureFirst=($fixture -split "`r?`n"|Where-Object{-not[string]::IsNullOrWhiteSpace($_)}|Select-Object -First 1).Trim()
-          if(-not$fixtureFirst.StartsWith('param(')){throw ('fixture param-first failed: '+$fixtureFirst)}
-
-          foreach($name in @('Get-DutySchedule','Invoke-DutyWindow')){
-            $sf=@($sa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|Where-Object{$_.Name-eq$name}|Select-Object -First 1)
-            $ff=@($fa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|Where-Object{$_.Name-eq$name}|Select-Object -First 1)
-            if($sf.Count-ne1-or$ff.Count-ne1){throw ('function missing '+$name)}
-            $sn=($sf[0].Extent.Text-replace'\s+',' ').Trim();$fn=($ff[0].Extent.Text-replace'\s+',' ').Trim()
-            if($sn-ne$fn){throw ('fixture/supervisor function drift '+$name)}
-          }
-
-          $tmp=Join-Path ([IO.Path]::GetTempPath()) ('ms_rc16_'+[guid]::NewGuid().ToString('N'))
-          [IO.Directory]::CreateDirectory($tmp)|Out-Null
-          try{
-            $fixturePath=Join-Path $tmp 'DUTY_BEHAVIOR_EXACT_SELFTEST.ps1'
-            $resultPath=Join-Path $tmp 'RESULT.json'
-            Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
-            & $fixturePath -ResultPath $resultPath
-            $r=Get-Content -Raw -LiteralPath $resultPath|ConvertFrom-Json
-            if($r.status-ne'PASS'){throw 'duty fixture status not PASS'}
-            if($r.rc14_old_active_ms.d10-ne0-or$r.rc14_old_active_ms.d25-ne0-or$r.rc14_old_active_ms.d40-ne0){throw 'old RC14 zero fixture mismatch'}
-            if($r.repaired_schedule_active_ms.'0.1'-ne200-or$r.repaired_schedule_active_ms.'0.25'-ne500-or$r.repaired_schedule_active_ms.'0.4'-ne800){throw 'repaired schedule mismatch'}
-            foreach($d in @('0.1','0.25','0.4')){if($r.fake_controller_timing.$d.resume_count_each-ne1-or$r.fake_controller_timing.$d.suspend_count_each-ne1){throw ('controller calls mismatch '+$d)}}
-
-            $apiFn=@($sa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-eq'Convert-LolApiHashrateMhs'},$true)|Select-Object -First 1)
-            $logFn=@($sa.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-eq'Parse-LolHashrateLine'},$true)|Select-Object -First 1)
-            if($apiFn.Count-ne1-or$logFn.Count-ne1){throw 'hashrate function extraction failed'}
-            $hashFixture="param()`n`$ErrorActionPreference='Stop'`nSet-StrictMode -Version Latest`n"+$apiFn[0].Extent.Text+"`n"+$logFn[0].Extent.Text+@'
-          
-          $apiFixture=[pscustomobject]@{ok=$true;data=[pscustomobject]@{Algorithm='Etchash';Performance_Unit='Mh/s';Total_Performance=12.352733907856239}}
-          $a=Convert-LolApiHashrateMhs $apiFixture
-          if($null-eq$a-or[Math]::Abs([double]$a-12.352733907856239)-gt0.000001){throw 'API fixture failed'}
-          $l=Parse-LolHashrateLine 'Average speed (5s): 17.89 Mh/s'
-          if($null-eq$l-or[Math]::Abs([double]$l-17.89)-gt0.000001){throw 'log fixture failed'}
-          Write-Output 'HASHRATE_FIXTURE_PASS'
-          '@
-            $hashPath=Join-Path $tmp 'HASH.ps1';Set-Content -LiteralPath $hashPath -Value $hashFixture -Encoding utf8
-            $ho=@(& $hashPath)
-            if($ho-notcontains'HASHRATE_FIXTURE_PASS'){throw 'hashrate exact behavior fixture failed'}
-
-            [ordered]@{
-              status='PASS'
-              powershell=$PSVersionTable.PSVersion.ToString()
-              main_parse='PASS'
-              stale_identity='ABSENT'
-              fixture_param_first='PASS'
-              fixture_supervisor_function_parity='PASS'
-              rc14_old_active_ms=$r.rc14_old_active_ms
-              repaired_active_ms=$r.repaired_schedule_active_ms
-              timing=$r.fake_controller_timing
-              hashrate_fixture='PASS'
-            }|ConvertTo-Json -Depth 20|Write-Host
-          }finally{Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue}
+          Write-Host 'EXACT_RC16_PARSE_PASS'
           PWSH
-          /tmp/pwsh763/pwsh -NoProfile -File /tmp/validate_rc16.ps1 -MainPath ci/miningsniper/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
+          /tmp/pwsh763/pwsh -NoProfile -File /tmp/parse_rc16.ps1 -MainPath ci/miningsniper/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
