@@ -1,0 +1,383 @@
+param([string]$Root='D:\MiningSniper')
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+
+$script:LearningModulePayload=@'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$script:MiningSniperLearningWriterVersion = '1.2'
+$script:MiningSniperLearningMutexName = 'Local\MiningSniperLearningBaseV1'
+
+function Get-MsLearningPaths {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    $root = [IO.Path]::GetFullPath($ProjectRoot)
+    [pscustomobject]@{
+        Root       = $root
+        Base       = Join-Path $root 'MININGSNIPER_LEARNING_BASE.json'
+        BaseTemp   = Join-Path $root 'MININGSNIPER_LEARNING_BASE.json.tmp'
+        BaseBackup = Join-Path $root 'MININGSNIPER_LEARNING_BASE.json.bak'
+        Learning   = Join-Path $root 'PROTECTED_STATE\Learning'
+        Journal    = Join-Path $root 'PROTECTED_STATE\Learning\LEARNING_EVENTS.jsonl'
+    }
+}
+
+function New-MsOrderedEvent {
+    param(
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][long]$RuntimeSeq,
+        [Parameter(Mandatory)][string]$Release,
+        [Parameter(Mandatory)][string]$EventType,
+        [Parameter(Mandatory)][string]$Stage,
+        [Parameter(Mandatory)][string]$Outcome,
+        [string]$Decision,
+        [string]$ReasonCode,
+        [string]$ReasonText,
+        [hashtable]$ComponentOutcomes,
+        [hashtable]$Evidence,
+        [string]$RootCauseStatus = 'OBSERVED_ONLY',
+        [string]$RootCauseOrUnknown = 'UNKNOWN_FROM_RUNTIME',
+        [string]$Source = 'SCRIPT'
+    )
+    [ordered]@{
+        event_id              = [guid]::NewGuid().ToString('N')
+        run_id                = $RunId
+        runtime_seq           = $RuntimeSeq
+        utc                   = [DateTimeOffset]::UtcNow.ToString('o')
+        writer_version        = $script:MiningSniperLearningWriterVersion
+        source                = $Source
+        release               = $Release
+        event_type            = $EventType
+        stage                 = $Stage
+        outcome               = $Outcome
+        decision              = $Decision
+        reason_code           = $ReasonCode
+        reason_text           = $ReasonText
+        component_outcomes    = if($null -ne $ComponentOutcomes){$ComponentOutcomes}else{@{}}
+        evidence              = if($null -ne $Evidence){$Evidence}else{@{}}
+        root_cause_status     = $RootCauseStatus
+        root_cause_or_unknown = $RootCauseOrUnknown
+    }
+}
+
+function Read-MsLearningBase {
+    param([Parameter(Mandatory)][string]$BasePath)
+    if(-not (Test-Path -LiteralPath $BasePath -PathType Leaf)){
+        throw "Learning base missing: $BasePath"
+    }
+    $raw = Get-Content -Raw -LiteralPath $BasePath -Encoding UTF8
+    if([string]::IsNullOrWhiteSpace($raw)){ throw "Learning base is empty: $BasePath" }
+    return ($raw | ConvertFrom-Json -AsHashtable -Depth 100)
+}
+
+function Read-MsJournalRecords {
+    param([Parameter(Mandatory)][string]$JournalPath)
+    $records = [Collections.Generic.List[object]]::new()
+    if(-not (Test-Path -LiteralPath $JournalPath -PathType Leaf)){ return @() }
+    foreach($line in [IO.File]::ReadLines($JournalPath)){
+        if([string]::IsNullOrWhiteSpace($line)){ continue }
+        try{
+            $obj = $line | ConvertFrom-Json -AsHashtable -Depth 100
+            if($obj.ContainsKey('event_id') -and $obj.ContainsKey('runtime_seq')){
+                $records.Add($obj)
+            }
+        }catch{
+            # A torn/corrupt tail is preserved in the journal for later forensic review.
+            # Valid prior lines continue to replay.
+        }
+    }
+    return @($records)
+}
+
+function Test-MsJournalNeedsSeparator {
+    param([Parameter(Mandatory)][string]$JournalPath)
+    if(-not(Test-Path -LiteralPath $JournalPath -PathType Leaf)){ return $false }
+    $fs=[IO.FileStream]::new($JournalPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    try{
+        if($fs.Length-le0){ return $false }
+        [void]$fs.Seek(-1,[IO.SeekOrigin]::End)
+        $last=$fs.ReadByte()
+        return ($last-ne10 -and $last-ne13)
+    }finally{
+        $fs.Dispose()
+    }
+}
+
+function Write-MsJournalRecordDurable {
+    param(
+        [Parameter(Mandatory)][string]$JournalPath,
+        [Parameter(Mandatory)][hashtable]$Record
+    )
+    $dir = Split-Path -Parent $JournalPath
+    [IO.Directory]::CreateDirectory($dir) | Out-Null
+    $prefix = if(Test-MsJournalNeedsSeparator -JournalPath $JournalPath){[Environment]::NewLine}else{''}
+    $json = $prefix + ($Record | ConvertTo-Json -Compress -Depth 100) + [Environment]::NewLine
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+
+    $fs = [IO.FileStream]::new(
+        $JournalPath,
+        [IO.FileMode]::Append,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::Read,
+        4096,
+        [IO.FileOptions]::WriteThrough
+    )
+    try{
+        $fs.Write($bytes,0,$bytes.Length)
+        $fs.Flush($true)
+    } finally {
+        $fs.Dispose()
+    }
+}
+
+function Write-MsBaseAtomic {
+    param(
+        [Parameter(Mandatory)][hashtable]$Base,
+        [Parameter(Mandatory)][pscustomobject]$Paths
+    )
+    $json = $Base | ConvertTo-Json -Depth 100
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json + [Environment]::NewLine)
+
+    if(Test-Path -LiteralPath $Paths.BaseTemp){ Remove-Item -LiteralPath $Paths.BaseTemp -Force }
+    $fs = [IO.FileStream]::new(
+        $Paths.BaseTemp,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None,
+        65536,
+        [IO.FileOptions]::WriteThrough
+    )
+    try{
+        $fs.Write($bytes,0,$bytes.Length)
+        $fs.Flush($true)
+    } finally {
+        $fs.Dispose()
+    }
+
+    if(Test-Path -LiteralPath $Paths.Base){
+        try{
+            [IO.File]::Replace($Paths.BaseTemp,$Paths.Base,$Paths.BaseBackup,$true)
+        }catch{
+            Copy-Item -LiteralPath $Paths.Base -Destination $Paths.BaseBackup -Force
+            [IO.File]::Move($Paths.BaseTemp,$Paths.Base,$true)
+        }
+    }else{
+        [IO.File]::Move($Paths.BaseTemp,$Paths.Base)
+    }
+}
+
+function Sync-MiningSniperLearningBase {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+
+    $paths = Get-MsLearningPaths -ProjectRoot $ProjectRoot
+    [IO.Directory]::CreateDirectory($paths.Learning) | Out-Null
+    $base = Read-MsLearningBase -BasePath $paths.Base
+
+    # Runtime-learning schema migration. Preserve semantic history; add only
+    # missing runtime-learning fields/contracts required by current project.
+    if(-not $base.ContainsKey('current_user_mandate')){ $base['current_user_mandate'] = [ordered]@{} }
+    $base['current_user_mandate']['runtime_learning_must_be_project_integrated'] = $true
+    $base['current_user_mandate']['script_is_primary_raw_fact_writer'] = $true
+
+    if(-not $base.ContainsKey('runtime_learning_integration')){
+        $base['runtime_learning_integration'] = [ordered]@{
+            schema='miningsniper-runtime-learning/v1'
+            writer_version=$script:MiningSniperLearningWriterVersion
+            design='WRITE_AHEAD_JOURNAL_PLUS_ATOMIC_BASE_SYNC'
+            project_paths=[ordered]@{
+                base='D:\MiningSniper\MININGSNIPER_LEARNING_BASE.json'
+                journal='D:\MiningSniper\PROTECTED_STATE\Learning\LEARNING_EVENTS.jsonl'
+                module='D:\MiningSniper\LEARNING\MiningSniper.Learning.psm1'
+                backup='D:\MiningSniper\MININGSNIPER_LEARNING_BASE.json.bak'
+            }
+            dual_writer_model=[ordered]@{
+                script='Primary recorder of observed runtime facts and exact gate reasons.'
+                assistant='Semantic compiler for root cause, corrections, prevention rules and retest policy.'
+            }
+            anti_spam_policy='Decision/milestone events only; raw telemetry remains separate.'
+        }
+    }else{
+        $base['runtime_learning_integration']['writer_version'] = $script:MiningSniperLearningWriterVersion
+    }
+
+    if(-not $base.ContainsKey('assistant_update_protocol')){ $base['assistant_update_protocol'] = [ordered]@{} }
+    $base['assistant_update_protocol']['new_chat_boot_rule'] = 'When this file is attached to a new chat, read semantic event_log and runtime_event_log. First summarize CURRENT_TRUTH, OPEN_UNKNOWNS, KNOWN_GOOD/DO_NOT_RETEST, incomplete runtime runs, and the latest semantic/runtime events before proposing code or host action.'
+
+    if(-not $base.ContainsKey('runtime_event_log')){ $base['runtime_event_log'] = @() }
+    if(-not $base.ContainsKey('runtime_revision')){ $base['runtime_revision'] = 0 }
+    if(-not $base.ContainsKey('runtime_learning')){ $base['runtime_learning'] = [ordered]@{} }
+
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach($e in @($base['runtime_event_log'])){
+        if($null -ne $e -and $e.ContainsKey('event_id')){ [void]$seen.Add([string]$e['event_id']) }
+    }
+
+    $records = @(Read-MsJournalRecords -JournalPath $paths.Journal | Sort-Object {[long]$_['runtime_seq']})
+    $added = 0
+    $maxSeq = [long]$base['runtime_revision']
+    foreach($r in $records){
+        $id = [string]$r['event_id']
+        $seq = [long]$r['runtime_seq']
+        if($seq -gt $maxSeq){ $maxSeq = $seq }
+        if($seen.Add($id)){
+            $base['runtime_event_log'] += ,$r
+            $added++
+        }
+    }
+
+    $base['runtime_revision'] = $maxSeq
+    $last = $null
+    if(@($base['runtime_event_log']).Count -gt 0){ $last = @($base['runtime_event_log'])[-1] }
+
+    $base['runtime_learning']['writer_version'] = $script:MiningSniperLearningWriterVersion
+    $base['runtime_learning']['runtime_event_count'] = @($base['runtime_event_log']).Count
+    $base['runtime_learning']['last_event'] = $last
+    $base['runtime_learning']['last_synced_utc'] = [DateTimeOffset]::UtcNow.ToString('o')
+    $base['runtime_learning']['journal'] = 'PROTECTED_STATE\Learning\LEARNING_EVENTS.jsonl'
+    $base['runtime_learning']['journal_replay_status'] = 'PASS'
+
+    Write-MsBaseAtomic -Base $base -Paths $paths
+    [pscustomobject]@{ added=$added; runtime_revision=$maxSeq; event_count=@($base['runtime_event_log']).Count }
+}
+
+function Get-MsNextRuntimeSeq {
+    param([Parameter(Mandatory)][string]$JournalPath)
+    $max = 0L
+    foreach($r in @(Read-MsJournalRecords -JournalPath $JournalPath)){
+        $s = [long]$r['runtime_seq']
+        if($s -gt $max){ $max = $s }
+    }
+    return ($max + 1L)
+}
+
+function Write-MiningSniperLearningEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$Release,
+        [Parameter(Mandatory)][string]$EventType,
+        [Parameter(Mandatory)][string]$Stage,
+        [Parameter(Mandatory)][string]$Outcome,
+        [string]$Decision,
+        [string]$ReasonCode,
+        [string]$ReasonText,
+        [hashtable]$ComponentOutcomes,
+        [hashtable]$Evidence,
+        [string]$RootCauseStatus = 'OBSERVED_ONLY',
+        [string]$RootCauseOrUnknown = 'UNKNOWN_FROM_RUNTIME',
+        [string]$Source = 'SCRIPT'
+    )
+
+    $mutex = [Threading.Mutex]::new($false,$script:MiningSniperLearningMutexName)
+    $locked = $false
+    try{
+        try{
+            $locked = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
+        }catch [Threading.AbandonedMutexException]{
+            # Previous writer died while holding the mutex. Ownership is granted to this waiter;
+            # journal replay is specifically designed to recover the interrupted write sequence.
+            $locked = $true
+        }
+        if(-not $locked){ throw 'Learning store mutex timeout' }
+
+        $paths = Get-MsLearningPaths -ProjectRoot $ProjectRoot
+        if(-not (Test-Path -LiteralPath $paths.Base)){ throw "Learning base missing: $($paths.Base)" }
+        $seq = Get-MsNextRuntimeSeq -JournalPath $paths.Journal
+        $event = New-MsOrderedEvent -RunId $RunId -RuntimeSeq $seq -Release $Release -EventType $EventType `
+            -Stage $Stage -Outcome $Outcome -Decision $Decision -ReasonCode $ReasonCode -ReasonText $ReasonText `
+            -ComponentOutcomes $ComponentOutcomes -Evidence $Evidence -RootCauseStatus $RootCauseStatus `
+            -RootCauseOrUnknown $RootCauseOrUnknown -Source $Source
+
+        # WRITE-AHEAD: this is the primary durability point.
+        Write-MsJournalRecordDurable -JournalPath $paths.Journal -Record $event
+
+        # Best-effort compile into canonical base. If this throws, event is already durable in the journal.
+        Sync-MiningSniperLearningBase -ProjectRoot $ProjectRoot | Out-Null
+        return [pscustomobject]$event
+    } finally {
+        if($locked){ $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+function Start-MiningSniperLearningRun {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$Release,
+        [Parameter(Mandatory)][string]$EntryPoint,
+        [Parameter(Mandatory)][string]$Intent,
+        [Parameter(Mandatory)][string]$Decision
+    )
+    $runId = ([guid]::NewGuid().ToString('N'))
+    Write-MiningSniperLearningEvent -ProjectRoot $ProjectRoot -RunId $runId -Release $Release `
+        -EventType 'RUN_START' -Stage 'RUN' -Outcome 'STARTED' -Decision $Decision `
+        -ReasonCode 'RUN_REQUESTED' -ReasonText $Intent -Evidence @{
+            entry_point=$EntryPoint
+            process_id=$PID
+            host=[Environment]::MachineName
+            pwsh=$PSVersionTable.PSVersion.ToString()
+        } | Out-Null
+    return $runId
+}
+
+function Write-MiningSniperLearningStep {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$Release,
+        [Parameter(Mandatory)][string]$StepId,
+        [Parameter(Mandatory)][ValidateSet('START','PASS','FAIL','UNKNOWN')][string]$Outcome,
+        [Parameter(Mandatory)][string]$Decision,
+        [Parameter(Mandatory)][string]$ReasonCode,
+        [Parameter(Mandatory)][string]$ReasonText,
+        [hashtable]$Evidence,
+        [hashtable]$ComponentOutcomes
+    )
+    $eventType = if($Outcome -eq 'START'){'STEP_START'}elseif($Outcome -eq 'PASS'){'STEP_PASS'}elseif($Outcome -eq 'FAIL'){'STEP_FAIL'}else{'COMPONENT_EVIDENCE'}
+    Write-MiningSniperLearningEvent -ProjectRoot $ProjectRoot -RunId $RunId -Release $Release `
+        -EventType $eventType -Stage $StepId -Outcome $Outcome -Decision $Decision `
+        -ReasonCode $ReasonCode -ReasonText $ReasonText -Evidence $Evidence `
+        -ComponentOutcomes $ComponentOutcomes
+}
+
+function Invoke-MiningSniperLearningStep {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$Release,
+        [Parameter(Mandatory)][string]$StepId,
+        [Parameter(Mandatory)][string]$Decision,
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [string]$PassReasonCode = 'STEP_COMPLETED',
+        [string]$PassReasonText = 'Decision-critical step completed without exception.',
+        [scriptblock]$EvidenceScript
+    )
+    Write-MiningSniperLearningStep -ProjectRoot $ProjectRoot -RunId $RunId -Release $Release `
+        -StepId $StepId -Outcome START -Decision $Decision -ReasonCode 'STEP_ENTER' `
+        -ReasonText 'Entering decision-critical step.' | Out-Null
+    try{
+        $result = & $Action
+        $evidence = @{}
+        if($null -ne $EvidenceScript){
+            $tmp = & $EvidenceScript $result
+            if($tmp -is [hashtable]){ $evidence = $tmp }
+        }
+        Write-MiningSniperLearningStep -ProjectRoot $ProjectRoot -RunId $RunId -Release $Release `
+            -StepId $StepId -Outcome PASS -Decision $Decision -ReasonCode $PassReasonCode `
+            -ReasonText $PassReasonText -Evidence $evidence | Out-Null
+        return $result
+    }catch{
+        $ex = $_
+        $evidence = @{
+            exception_type = $ex.Exception.GetType().FullName
+            exception_message = $ex.Exception.Message
+            script_stack = $ex.ScriptStackTrace
+            position_message = $ex.InvocationInfo.PositionMessage
+        }
+        Write-MiningSniperLearningStep -ProjectRoot $ProjectRoot -RunId $RunId -Release $Release `
+            -StepId $StepId -Outcome FA
