@@ -29,7 +29,6 @@ jobs:
           tar -xzf /tmp/powershell.tar.gz -C /tmp/pwsh763
           chmod +x /tmp/pwsh763/pwsh
           test "$(/tmp/pwsh763/pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')" = '7.6.3'
-          echo /tmp/pwsh763 >> "$GITHUB_PATH"
 
       - name: Download exact RC16 PASS artifact
         env:
@@ -51,10 +50,14 @@ jobs:
           python ci/miningsniper/rc17/build_rc17.py /tmp/rc16/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1 /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1
           sha256sum /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1
 
-      - name: Validate exact RC17
-        shell: pwsh
+      - name: Validate exact RC17 with exact PowerShell 7.6.3
+        shell: bash
         run: |
-          ./ci/miningsniper/rc17/validate_rc17.ps1 -Rc16Path /tmp/rc16/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1 -Rc17Path /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1 -Rc16ValidationPath /tmp/rc16/RC16_REBUILD_VALIDATION.json -ResultPath /tmp/RC17_PRECHAT_VALIDATION.json
+          set -euo pipefail
+          export PATH="/tmp/pwsh763:$PATH"
+          test "$(pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')" = '7.6.3'
+          /tmp/pwsh763/pwsh -NoProfile -File ci/miningsniper/rc17/validate_rc17.ps1 -Rc16Path /tmp/rc16/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1 -Rc17Path /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1 -Rc16ValidationPath /tmp/rc16/RC16_REBUILD_VALIDATION.json -ResultPath /tmp/RC17_PRECHAT_VALIDATION.json
+          /tmp/pwsh763/pwsh -NoProfile -Command '$r=Get-Content -Raw /tmp/RC17_PRECHAT_VALIDATION.json|ConvertFrom-Json;if($r.status-ne"PASS"-or$r.powershell-ne"7.6.3"){throw "RC17 exact-version receipt failed"}'
 
       - name: Preserve exact candidate and receipts
         if: always()
