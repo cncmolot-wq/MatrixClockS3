@@ -94,7 +94,7 @@ jobs:
           $dir="$env:RUNNER_TEMP\rc17"
           Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
           $h=(Get-FileHash -Algorithm SHA256 -LiteralPath "$dir\RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1").Hash.ToLowerInvariant()
-          if($h-ne'4db120356fe7b5e3619d226e5aabcaf598bf57d7f3ebe17fbaa4bb21c3d157'){throw "RC17 SHA mismatch $h"}
+          if($h-ne'4db120356fe7b5e3619d226e5aabcaf598bf57d7f3ebe17fbaa4bb7fd2f2a9fc'){throw "RC17 SHA mismatch $h"}
       - name: Build exact RC18 deterministically
         shell: powershell
         run: |
