@@ -1,0 +1,67 @@
+name: MiningSniper RC17 exact prechat
+
+on:
+  push:
+    branches:
+      - miningsniper-ci-rc17
+    paths:
+      - 'ci/miningsniper/rc17/**'
+      - '.github/workflows/miningsniper-rc17-prechat.yml'
+
+jobs:
+  rc17-prechat:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install exact PowerShell 7.6.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/powershell-7.6.3-linux-x64.tar.gz'
+          expected='856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7'
+          curl -L --fail --retry 3 -o /tmp/powershell.tar.gz "$url"
+          echo "$expected  /tmp/powershell.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/pwsh763
+          tar -xzf /tmp/powershell.tar.gz -C /tmp/pwsh763
+          chmod +x /tmp/pwsh763/pwsh
+          test "$(/tmp/pwsh763/pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')" = '7.6.3'
+          echo /tmp/pwsh763 >> "$GITHUB_PATH"
+
+      - name: Download exact RC16 PASS artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/${{ github.repository }}/actions/artifacts/9254911726/zip > /tmp/rc16.zip
+          mkdir -p /tmp/rc16
+          unzip -q /tmp/rc16.zip -d /tmp/rc16
+          test -f /tmp/rc16/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1
+          test "$(sha256sum /tmp/rc16/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1 | awk '{print $1}')" = 'bd73212ceb5f4846898e5208bd4c50e8fe2825294a51f36b4a3a3ebe212fb2cc'
+          test -f /tmp/rc16/RC16_REBUILD_VALIDATION.json
+
+      - name: Build deterministic RC17 from exact RC16
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ci/miningsniper/rc17/build_rc17.py /tmp/rc16/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1 /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1
+          sha256sum /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1
+
+      - name: Validate exact RC17
+        shell: pwsh
+        run: |
+          ./ci/miningsniper/rc17/validate_rc17.ps1 -Rc16Path /tmp/rc16/RUN_ACTIVATE_R065_GPU_LANE_RC16.ps1 -Rc17Path /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1 -Rc16ValidationPath /tmp/rc16/RC16_REBUILD_VALIDATION.json -ResultPath /tmp/RC17_PRECHAT_VALIDATION.json
+
+      - name: Preserve exact candidate and receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miningsniper-rc17-exact
+          if-no-files-found: error
+          path: |
+            /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1
+            /tmp/RC17_PRECHAT_VALIDATION.json
