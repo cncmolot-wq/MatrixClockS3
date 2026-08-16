@@ -1,0 +1,121 @@
+name: MiningSniper RC18 exact prechat
+
+on:
+  push:
+    branches:
+      - miningsniper-ci-rc18
+    paths:
+      - 'ci/miningsniper/rc18/**'
+      - '.github/workflows/miningsniper-rc18-prechat.yml'
+
+jobs:
+  linux-exact:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install exact PowerShell 7.6.3 Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/powershell-7.6.3-linux-x64.tar.gz'
+          expected='856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7'
+          curl -L --fail --retry 3 -o /tmp/powershell.tar.gz "$url"
+          echo "$expected  /tmp/powershell.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/pwsh763
+          tar -xzf /tmp/powershell.tar.gz -C /tmp/pwsh763
+          chmod +x /tmp/pwsh763/pwsh
+          test "$(/tmp/pwsh763/pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')" = '7.6.3'
+      - name: Download exact RC17 PASS artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/${{ github.repository }}/actions/artifacts/9255607405/zip > /tmp/rc17.zip
+          mkdir -p /tmp/rc17
+          unzip -q /tmp/rc17.zip -d /tmp/rc17
+          test "$(sha256sum /tmp/rc17/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1 | awk '{print $1}')" = '4db120356fe7b5e3619d226e5aabcaf598bf57d7f3ebe17fbaa4bb7fd2f2a9fc'
+          test -f /tmp/rc17/RC17_PRECHAT_VALIDATION.json
+      - name: Build exact RC18 deterministically
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ci/miningsniper/rc18/build_rc18.py /tmp/rc17/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1 /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC18.ps1
+          test "$(sha256sum /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC18.ps1 | awk '{print $1}')" = '8568d32ce0a0533054cde3d21be2ee55d11d780a9ae5d9e8bf65cfbff0abd74a'
+      - name: Validate exact RC18 on Linux PowerShell 7.6.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/tmp/pwsh763:$PATH"
+          /tmp/pwsh763/pwsh -NoProfile -File ci/miningsniper/rc18/validate_rc18.ps1 -Rc17Path /tmp/rc17/RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1 -Rc18Path /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC18.ps1 -Rc17ValidationPath /tmp/rc17/RC17_PRECHAT_VALIDATION.json -ResultPath /tmp/RC18_PRECHAT_LINUX.json
+      - name: Preserve Linux receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc18-linux-exact
+          if-no-files-found: error
+          path: |
+            /tmp/RUN_ACTIVATE_R065_GPU_LANE_RC18.ps1
+            /tmp/RC18_PRECHAT_LINUX.json
+
+  windows-exact:
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install exact PowerShell 7.6.3 Windows x64
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $url='https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/PowerShell-7.6.3-win-x64.zip'
+          $zip="$env:RUNNER_TEMP\pwsh763.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $actual=(Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if($actual-ne'07ddb0d00b660459560ef82a9841da7705b27cd5dcca5a0d7b025a98eca29eca'){throw "PowerShell archive SHA mismatch $actual"}
+          $dir="$env:RUNNER_TEMP\pwsh763"
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          $v=& "$dir\pwsh.exe" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          if($v-ne'7.6.3'){throw "Unexpected PowerShell $v"}
+      - name: Download exact RC17 PASS artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip="$env:RUNNER_TEMP\rc17.zip"
+          $url='https://api.github.com/repos/${{ github.repository }}/actions/artifacts/9255607405/zip'
+          & curl.exe -L --fail -H "Authorization: Bearer $env:GH_TOKEN" -H 'Accept: application/vnd.github+json' -o $zip $url
+          if($LASTEXITCODE-ne0){throw 'RC17 artifact download failed'}
+          $dir="$env:RUNNER_TEMP\rc17"
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          $h=(Get-FileHash -Algorithm SHA256 -LiteralPath "$dir\RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1").Hash.ToLowerInvariant()
+          if($h-ne'4db120356fe7b5e3619d226e5aabcaf598bf57d7f3ebe17fbaa4bb21c3d157'){throw "RC17 SHA mismatch $h"}
+      - name: Build exact RC18 deterministically
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          python 'ci\miningsniper\rc18\build_rc18.py' "$env:RUNNER_TEMP\rc17\RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1" "$env:RUNNER_TEMP\RUN_ACTIVATE_R065_GPU_LANE_RC18.ps1"
+          if($LASTEXITCODE-ne0){throw 'RC18 build failed'}
+          $h=(Get-FileHash -Algorithm SHA256 -LiteralPath "$env:RUNNER_TEMP\RUN_ACTIVATE_R065_GPU_LANE_RC18.ps1").Hash.ToLowerInvariant()
+          if($h-ne'8568d32ce0a0533054cde3d21be2ee55d11d780a9ae5d9e8bf65cfbff0abd74a'){throw "RC18 SHA mismatch $h"}
+      - name: Validate exact RC18 on Windows PowerShell 7.6.3
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $pwsh="$env:RUNNER_TEMP\pwsh763\pwsh.exe"
+          & $pwsh -NoProfile -File 'ci\miningsniper\rc18\validate_rc18.ps1' -Rc17Path "$env:RUNNER_TEMP\rc17\RUN_ACTIVATE_R065_GPU_LANE_RC17.ps1" -Rc18Path "$env:RUNNER_TEMP\RUN_ACTIVATE_R065_GPU_LANE_RC18.ps1" -Rc17ValidationPath "$env:RUNNER_TEMP\rc17\RC17_PRECHAT_VALIDATION.json" -ResultPath "$env:RUNNER_TEMP\RC18_PRECHAT_WINDOWS.json"
+          if($LASTEXITCODE-ne0){throw "RC18 validator exit $LASTEXITCODE"}
+      - name: Preserve Windows receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc18-windows-exact
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}\RUN_ACTIVATE_R065_GPU_LANE_RC18.ps1
+            ${{ runner.temp }}\RC18_PRECHAT_WINDOWS.json
