@@ -22,7 +22,7 @@ public_selftest=r'''function Test-MiningSniperLearningStore {
         [Parameter(Mandatory)][string]$SourceBasePath
     )
 
-    $selfRoot = Join-Path $env:TEMP ('MS_LEARNING_STORE_SELFTEST_'+[guid]::NewGuid().ToString('N'))
+    $selfRoot = Join-Path ([IO.Path]::GetTempPath()) ('MS_LEARNING_STORE_SELFTEST_'+[guid]::NewGuid().ToString('N'))
     $selfState = Join-Path $selfRoot 'PROTECTED_STATE\Learning'
     [IO.Directory]::CreateDirectory($selfState) | Out-Null
     Copy-Item -LiteralPath $SourceBasePath -Destination (Join-Path $selfRoot 'MININGSNIPER_LEARNING_BASE.json') -Force
