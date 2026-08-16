@@ -74,7 +74,8 @@ jobs:
           $ErrorActionPreference='Stop'
           $url='https://github.com/PowerShell/PowerShell/releases/download/v7.6.3/PowerShell-7.6.3-win-x64.zip'
           $zip="$env:RUNNER_TEMP\pwsh763.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
+          & curl.exe -L --fail --retry 3 -o $zip $url
+          if($LASTEXITCODE-ne0){throw 'PowerShell 7.6.3 download failed'}
           $actual=(Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
           if($actual-ne'07ddb0d00b660459560ef82a9841da7705b27cd5dcca5a0d7b025a98eca29eca'){throw "PowerShell archive SHA mismatch $actual"}
           $dir="$env:RUNNER_TEMP\pwsh763"
