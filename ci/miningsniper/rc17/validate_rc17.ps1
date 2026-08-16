@@ -46,7 +46,6 @@ foreach($n in $payloadNames){
   $payloadParse[$n]='PASS'
 }
 
-# GPU/control behavior must be byte-text equivalent to the already fully validated RC16 payloads after identity normalization.
 $gpuPayloadParity=[ordered]@{}
 foreach($n in @('SupervisorPayload','DutyFixturePayload','StopPayload','StatusPayload','ExportPayload')){
   $norm=$p17[$n].Replace('GPU_LANE_R065_RC17','GPU_LANE_R065_RC16').Replace('R065_RC17','R065_RC16').Replace('GPU RC17','GPU RC16').Replace('RC17','RC16').Replace('0.65.2','0.65.1')
@@ -55,15 +54,13 @@ foreach($n in @('SupervisorPayload','DutyFixturePayload','StopPayload','StatusPa
   if(-not$eq){throw ('GPU payload drift beyond release identity: '+$n)}
 }
 
-# Launcher itself must not call module-private helpers.
 $commands=@($rc17Ast.FindAll({param($n)$n-is[Management.Automation.Language.CommandAst]},$true)|ForEach-Object{$_.GetCommandName()}|Where-Object{$_})
 $privateHelpers=@('Get-MsLearningPaths','Get-MsNextRuntimeSeq','New-MsOrderedEvent','Write-MsJournalRecordDurable')
 foreach($private in $privateHelpers){if($private-in$commands){throw ('Launcher directly calls private module helper '+$private)}}
 
-$tmp=Join-Path $env:TEMP ('MS_RC17_VALIDATION_'+[guid]::NewGuid().ToString('N'))
+$tmp=Join-Path ([IO.Path]::GetTempPath()) ('MS_RC17_VALIDATION_'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp|Out-Null
 try{
-  # Exact embedded module import/export closure and public selftest.
   $modulePath=Join-Path $tmp 'MiningSniper.Learning.psm1'
   Set-Content -LiteralPath $modulePath -Value $p17['LearningModulePayload'] -Encoding utf8
   $mt=$null;$me=$null;[void][Management.Automation.Language.Parser]::ParseFile($modulePath,[ref]$mt,[ref]$me)
@@ -83,7 +80,6 @@ try{
   $self=Test-MiningSniperLearningStore -ProjectRoot $baseRoot -SourceBasePath $basePath
   if([string]$self.status-ne'PASS'){throw 'Public learning store selftest did not PASS'}
 
-  # Exact bootstrap persistence functions from the delivered launcher.
   $bootstrapFns=@('Get-BootstrapLearningSeq','Sync-BootstrapEventToCanonicalBase','Write-BootstrapLearningEvent')
   $texts=@();foreach($fn in $bootstrapFns){$texts+=Get-FunctionText $rc17Ast $fn}
   $bootRoot=Join-Path $tmp 'bootstrap'
@@ -122,14 +118,12 @@ Write-Host 'BOOTSTRAP_FAILURE_BASE_PERSISTENCE_PASS'
   if($LASTEXITCODE-ne0-or($bo-notcontains'BOOTSTRAP_FAILURE_BASE_PERSISTENCE_PASS')){throw ('Bootstrap persistence fixture failed: '+($bo-join' | '))}
   $bootstrapProof=Get-Content -Raw -LiteralPath $bootResult|ConvertFrom-Json
 
-  # Exact embedded duty fixture executes again in RC17.
   $dutyScript=Join-Path $tmp 'DUTY_RC17.ps1';$dutyResult=Join-Path $tmp 'DUTY_RC17.json'
   Set-Content -LiteralPath $dutyScript -Value $p17['DutyFixturePayload'] -Encoding utf8
   $do=@(& pwsh -NoProfile -File $dutyScript -ResultPath $dutyResult 2>&1)
   if($LASTEXITCODE-ne0-or($do-notcontains'DUTY_BEHAVIOR_EXACT_SELFTEST_PASS')){throw ('RC17 duty fixture failed: '+($do-join' | '))}
   $dutyProof=Get-Content -Raw -LiteralPath $dutyResult|ConvertFrom-Json
 
-  # Exact production hashrate functions from RC17 supervisor.
   $st=$null;$se=$null;$supAst=[Management.Automation.Language.Parser]::ParseInput($p17['SupervisorPayload'],[ref]$st,[ref]$se)
   if($se.Count-gt0){throw 'Supervisor payload parse unexpectedly failed'}
   $hashScript=Join-Path $tmp 'HASH_RC17.ps1'
